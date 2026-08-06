@@ -10,7 +10,9 @@ defineEmits<{ close: [] }>()
         <h2>{{ title }}</h2>
         <button type="button" class="icon-button" aria-label="关闭" @click="$emit('close')">&times;</button>
       </header>
-      <slot />
+      <div class="modal-body">
+        <slot />
+      </div>
     </section>
   </div>
 </template>
@@ -34,4 +36,5 @@ header h2 { font-size: 17px; margin: 0; }
   border: 0; background: none; font-size: 21px; color: var(--stone, #87867f);
   cursor: pointer; padding: 0; line-height: 1;
 }
+.modal-body { padding: 20px; }
 </style>
