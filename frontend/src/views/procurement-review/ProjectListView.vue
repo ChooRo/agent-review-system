@@ -102,7 +102,7 @@ onMounted(load)
       <div class="field"><label>项目编号</label><input v-model.trim="form.project_code" required /></div>
       <div class="field"><label>经办部门</label><input v-model.trim="form.handling_department" required /></div>
       <div class="field"><label>项目负责人</label><input v-model.trim="form.project_owner" required /></div>
-      <div class="modal-foot" style="grid-column:1/-1;padding:0;border:0">
+      <div class="modal-foot">
         <button type="button" class="btn" @click="showCreate = false">取消</button>
         <button class="btn pri" :disabled="pending">{{ pending ? '创建中…' : '创建项目' }}</button>
       </div>

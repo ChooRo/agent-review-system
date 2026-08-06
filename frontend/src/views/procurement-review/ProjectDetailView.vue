@@ -81,9 +81,6 @@ onMounted(load)
     </div>
     <div class="page-title-row">
       <h2>{{ project?.name ?? '项目不存在' }}</h2>
-      <div class="page-title-actions">
-        <button class="btn pri" :disabled="!project" @click="showCreate = true">新建采购文件审查</button>
-      </div>
     </div>
     <p>{{ project?.project_code }} · {{ project?.handling_department }} · 项目负责人：{{ project?.project_owner }}</p>
   </div>
@@ -92,6 +89,13 @@ onMounted(load)
     <div v-if="loading" class="state-card">正在载入项目…</div>
 
     <template v-else-if="project">
+      <!-- Toolbar -->
+      <div class="toolbar">
+        <button class="link-btn" @click="router.push('/projects')">&larr; 返回项目列表</button>
+        <span class="sp"></span>
+        <span class="pill doing">进行中</span>
+        <button class="btn pri" @click="showCreate = true">+ 新建审查任务</button>
+      </div>
       <div v-if="tasks.length" class="project-task-card">
         <div class="project-task-head">
           <div>
@@ -150,15 +154,19 @@ onMounted(load)
 
   <!-- Create Task Modal -->
   <BaseModal v-if="showCreate" title="新建采购文件审查任务" @close="showCreate = false">
-    <form class="form-grid" @submit.prevent="submit">
-      <div class="field full"><label>任务名称</label><input v-model="title" placeholder="默认使用项目名称" /></div>
-      <div class="field full">
+    <form @submit.prevent="submit">
+      <div class="note" style="margin:0 0 14px">上传采购文件后系统将自动解析并生成 AI 审查结论，完成后可进入工作台处理。</div>
+      <div class="field" style="margin-bottom:12px">
+        <label>任务名称</label>
+        <input v-model="title" placeholder="默认使用项目名称" />
+      </div>
+      <div class="field" style="margin-bottom:12px">
         <label>采购文件</label>
         <input type="file" accept=".doc,.docx,.pdf" required @change="onFile" />
         <span style="font-size:10px;color:var(--stone);margin-top:4px">仅上传一个文件，支持 DOC、DOCX、PDF。</span>
       </div>
-      <p v-if="uploadError" style="color:var(--crimson);font-size:12px;margin:0">{{ uploadError }}</p>
-      <div class="modal-foot" style="grid-column:1/-1;padding:0;border:0">
+      <p v-if="uploadError" style="color:var(--crimson);font-size:12px;margin:0 0 12px">{{ uploadError }}</p>
+      <div class="modal-foot">
         <button type="button" class="btn" @click="showCreate = false">取消</button>
         <button class="btn pri" :disabled="pending">{{ pending ? '提交中…' : '上传并开始解析' }}</button>
       </div>
