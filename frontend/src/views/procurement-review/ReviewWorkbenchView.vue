@@ -109,7 +109,7 @@ onMounted(load)
   </div>
 
   <!-- Page Body -->
-  <div class="page-body">
+  <div class="page-body workbench-page">
     <div v-if="notice" class="status-banner">{{ notice }}</div>
     <div v-if="!task" class="state-card error-state">资源不存在或无权查看。</div>
 
