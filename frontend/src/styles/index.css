@@ -494,26 +494,7 @@ table.tbl {
 .upload-hint { font-size: 10px; color: var(--stone); line-height: 1.45; }
 .upload-file { font-size: 11px; font-weight: 600; color: var(--green); margin-top: 7px; word-break: break-all; }
 
-/* ===== Modal ===== */
-.modal-back {
-  position: fixed; inset: 0; background: rgba(20, 20, 19, .55);
-  z-index: 100; display: flex; align-items: center; justify-content: center; padding: 24px;
-}
-.modal {
-  width: min(620px, 96vw); max-height: 88vh; overflow: auto;
-  background: var(--white); border-radius: 16px;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, .28);
-}
-.modal-head {
-  padding: 17px 20px; border-bottom: 1px solid var(--border);
-  display: flex; align-items: center;
-}
-.modal-head h3 { font-size: 17px; }
-.modal-head button {
-  margin-left: auto; border: 0; background: none;
-  font-size: 21px; color: var(--stone); cursor: pointer;
-}
-.modal-body { padding: 20px; }
+/* ===== Modal form footer ===== */
 .modal-foot {
   padding: 14px 20px; border-top: 1px solid var(--border);
   display: flex; justify-content: flex-end; gap: 9px;
