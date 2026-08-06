@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 
@@ -12,31 +12,42 @@ const navSections = [
     section: '审查中心',
     items: [
       { id: 'tasks', icon: 'tasks', label: '审查任务', to: '/projects' },
-      { id: 'workbench', icon: 'search', label: '审查工作台', to: '/projects', lock: false },
+      { id: 'workbench', icon: 'search', label: '审查工作台', to: '/projects' },
     ],
   },
   {
     section: '项目闭环',
     items: [
-      { id: 'rereview', icon: 'refresh', label: '整改核销', to: '/rectification', lock: false },
-      { id: 'archive', icon: 'folder', label: '项目档案', to: '/projects', lock: false },
+      { id: 'rereview', icon: 'refresh', label: '整改核销', to: '/rectification' },
+      { id: 'archive', icon: 'folder', label: '项目档案', to: '/projects/prj_001/archive' },
     ],
   },
   {
     section: '知识资产',
     items: [
-      { id: 'kb', icon: 'book', label: '知识库', to: '/knowledge', lock: false },
-      { id: 'cases', icon: 'bulb', label: '经验案例库', to: '/cases', lock: false },
-      { id: 'fix', icon: 'wrench', label: '强制纠偏', to: '/corrections', lock: false },
+      { id: 'kb', icon: 'book', label: '知识库', to: '/knowledge' },
+      { id: 'cases', icon: 'bulb', label: '经验案例库', to: '/cases' },
+      { id: 'fix', icon: 'wrench', label: '强制纠偏', to: '/corrections' },
     ],
   },
   {
     section: '治理',
     items: [
-      { id: 'perm', icon: 'key', label: '用户与权限', to: '/admin/users', lock: false, adminOnly: true },
+      { id: 'perm', icon: 'key', label: '用户与权限', to: '/admin/users' },
     ],
   },
 ]
+
+const activeRoutes: Record<string, string[]> = {
+  tasks: ['projects', 'procurement-project'],
+  workbench: ['procurement-workbench'],
+  rereview: ['rectification'],
+  archive: ['project-archive'],
+  kb: ['knowledge'],
+  cases: ['cases'],
+  fix: ['corrections'],
+  perm: ['admin-users'],
+}
 
 // SVG icons (Lucide-style)
 const icons: Record<string, string> = {
@@ -61,13 +72,12 @@ function iconSvg(name: string, size = 18) {
 
 const isAdmin = computed(() => auth.user?.roles.some((r) => r.code === 'admin'))
 
-function isActive(navId: string, to: string) {
-  if (route.path === to) return true
-  return false
+function isActive(navId: string) {
+  const names = activeRoutes[navId]
+  return names ? names.includes(route.name as string) : false
 }
 
-function navClick(item: { id: string; to: string; lock?: boolean }) {
-  if (item.lock) return
+function navClick(item: { id: string; to: string }) {
   router.push(item.to)
 }
 
@@ -114,16 +124,13 @@ function logout() {
           <div class="navsec">{{ section.section }}</div>
           <button
             v-for="item in section.items"
-            v-show="!item.adminOnly || isAdmin"
             :key="item.id"
             class="navitem"
-            :class="{ on: isActive(item.id, item.to), locked: item.lock }"
+            :class="{ on: isActive(item.id) }"
             @click="navClick(item)"
           >
             <span class="ic" v-html="iconSvg(item.icon, 17)"></span>
             {{ item.label }}
-            <span v-if="item.lock" class="lk">🔒</span>
-            <span v-if="item.id === 'perm' && isAdmin" class="badge-lite">管理</span>
           </button>
         </template>
       </nav>
