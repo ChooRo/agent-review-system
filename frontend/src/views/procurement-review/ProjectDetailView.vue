@@ -12,12 +12,18 @@ const project = ref<Project>()
 const tasks = ref<ReviewTask[]>([])
 const loading = ref(true)
 const showCreate = ref(false)
+const createStep = ref(1) // 1 = choose type, 2 = upload file
+const draftMode = ref<'single' | 'dual' | 'triple'>('single')
 const title = ref('')
 const file = ref<File>()
 const uploadError = ref('')
 const pending = ref(false)
 const projectId = computed(() => String(route.params.projectId))
 const error = ref('')
+
+function startCreate() { createStep.value = 1; draftMode.value = 'single'; title.value = ''; file.value = undefined; uploadError.value = ''; showCreate.value = true }
+function selectType(mode: 'single' | 'dual' | 'triple') { if (mode !== 'single') return; draftMode.value = mode; createStep.value = 2 }
+function backToStep1() { createStep.value = 1 }
 
 const statusLabel: Record<string, string> = {
   draft: '草稿', parsing: '解析中', reviewing: 'AI 审查中',
@@ -94,7 +100,7 @@ onMounted(load)
         <button class="link-btn" @click="router.push('/projects')">&larr; 返回项目列表</button>
         <span class="sp"></span>
         <span class="pill doing">进行中</span>
-        <button class="btn pri" @click="showCreate = true">+ 新建审查任务</button>
+        <button class="btn pri" @click="startCreate">+ 新建审查任务</button>
       </div>
       <div v-if="tasks.length" class="project-task-card">
         <div class="project-task-head">
@@ -152,10 +158,42 @@ onMounted(load)
     <div v-else class="state-card error-state">资源不存在或您无权查看。</div>
   </div>
 
-  <!-- Create Task Modal -->
-  <BaseModal v-if="showCreate" title="新建采购文件审查任务" @close="showCreate = false">
+  <!-- Create Task Modal — Step 1: choose type -->
+  <BaseModal v-if="showCreate && createStep === 1" title="新建审查任务" @close="showCreate = false">
+    <div class="stepper" style="margin-bottom:16px">
+      <div class="step-dot on">1 · 选择审查类型</div>
+      <div class="step-dot">2 · 上传文件</div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:9px">
+      <button class="task-type-option" @click="selectType('single')">
+        <b>采购文件合规性审查</b>
+        <span>上传采购文件，检查制度、条款和附件的合规性。</span>
+        <em>单文件审查</em>
+      </button>
+      <button class="task-type-option locked" disabled>
+        <b>响应文件完整性审查</b>
+        <span>需先完成本项目采购文件审查并确认终版。</span>
+        <em>暂不可创建</em>
+      </button>
+      <button class="task-type-option locked" disabled>
+        <b>合同一致性审查</b>
+        <span>审查合同与采购要求、响应承诺是否一致。</span>
+        <em>暂不可创建</em>
+      </button>
+    </div>
+    <div class="modal-foot" style="margin-top:14px">
+      <button type="button" class="btn" @click="showCreate = false">取消</button>
+    </div>
+  </BaseModal>
+
+  <!-- Create Task Modal — Step 2: upload file -->
+  <BaseModal v-if="showCreate && createStep === 2" title="新建审查任务" @close="showCreate = false">
+    <div class="stepper" style="margin-bottom:16px">
+      <div class="step-dot done">1 · 选择审查类型</div>
+      <div class="step-dot on">2 · 上传文件</div>
+    </div>
     <form @submit.prevent="submit">
-      <div class="note" style="margin:0 0 14px">上传采购文件后系统将自动解析并生成 AI 审查结论，完成后可进入工作台处理。</div>
+      <div class="note" style="margin:0 0 14px"><b>已选择：</b>采购文件合规性审查 — 上传采购文件后系统将自动解析并生成 AI 审查结论。</div>
       <div class="field" style="margin-bottom:12px">
         <label>任务名称</label>
         <input v-model="title" placeholder="默认使用项目名称" />
@@ -167,7 +205,7 @@ onMounted(load)
       </div>
       <p v-if="uploadError" style="color:var(--crimson);font-size:12px;margin:0 0 12px">{{ uploadError }}</p>
       <div class="modal-foot">
-        <button type="button" class="btn" @click="showCreate = false">取消</button>
+        <button type="button" class="btn" @click="backToStep1">上一步</button>
         <button class="btn pri" :disabled="pending">{{ pending ? '提交中…' : '上传并开始解析' }}</button>
       </div>
     </form>

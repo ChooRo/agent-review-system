@@ -447,6 +447,20 @@ table.tbl {
 .yes { color: var(--green); font-weight: 700; }
 .no { color: var(--ring); }
 
+/* ===== Task Type Options (create task modal) ===== */
+.task-type-option {
+  display: block; width: 100%; padding: 14px 16px;
+  border: 1px solid var(--border2); border-radius: 12px;
+  background: var(--white); cursor: pointer; text-align: left;
+  transition: all .18s;
+}
+.task-type-option:hover { border-color: var(--terra); background: var(--terra-soft); }
+.task-type-option b { display: block; font: 14px var(--serif); color: var(--ink); }
+.task-type-option span { display: block; font-size: 11.5px; color: var(--stone); margin-top: 4px; line-height: 1.5; }
+.task-type-option em { display: inline-block; margin-top: 6px; font-size: 10px; font-style: normal; font-weight: 600; color: var(--terra); background: var(--terra-soft); padding: 2px 8px; border-radius: 20px; }
+.task-type-option.locked { opacity: .5; cursor: not-allowed; background: repeating-linear-gradient(45deg, var(--ivory), var(--ivory) 9px, #f2f0e9 9px, #f2f0e9 18px); }
+.task-type-option.locked em { color: var(--stone); background: var(--sand); }
+
 /* ===== Progress ===== */
 .progress { height: 7px; background: var(--sand); border-radius: 20px; overflow: hidden; }
 .progress i { display: block; height: 100%; background: var(--terra); border-radius: inherit; transition: width .35s; }
@@ -532,6 +546,19 @@ table.tbl {
   background: var(--ivory); border: 1px solid var(--border);
   border-radius: 10px; padding: 11px 13px; margin-top: 10px;
 }
+
+/* ===== Finding Nav (workbench middle column) ===== */
+.finding-nav-btn {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px;
+  width: 100%; padding: 9px 10px; border: 1px solid transparent; border-radius: 8px;
+  background: transparent; color: var(--ink2); text-align: left;
+  font-size: 11px; cursor: pointer; margin-bottom: 2px;
+}
+.finding-nav-btn:hover { background: var(--ivory); }
+.finding-nav-btn.sel { border-color: var(--terra); background: var(--terra-soft); }
+.finding-nav-btn.recheck { box-shadow: inset 2px 0 var(--ochre); }
+.finding-nav-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.risk-dot { width: 7px; height: 7px; margin-top: 4px; border-radius: 50%; flex: 0 0 auto; }
 
 /* ===== Annotation Bar ===== */
 .anno-bar {
