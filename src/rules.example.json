@@ -1,0 +1,15 @@
+{
+  "rules": [
+    {
+      "rule_id": "RULE-DEMO-001",
+      "title": "示例：采购文件时间一致性",
+      "status": "draft",
+      "applies_to": ["procurement"],
+      "keywords": ["截止时间", "开标时间"],
+      "risk_level": "high",
+      "condition": "同一时间事件在不同章节出现不一致日期",
+      "conclusion": "提示人工确认并统一时间",
+      "legal_basis": []
+    }
+  ]
+}

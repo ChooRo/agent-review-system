@@ -1,0 +1,4 @@
+interface:
+  display_name: "文档结构理解"
+  short_description: "Build traceable whole-document structure profiles"
+  default_prompt: "Use $understand-document-structure to build a traceable structure profile from this procurement document."

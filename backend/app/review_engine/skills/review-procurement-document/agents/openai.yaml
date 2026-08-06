@@ -1,0 +1,4 @@
+interface:
+  display_name: "采购文件审查"
+  short_description: "审查采购文件完整性、明确性、一致性、可执行性及法规合规风险"
+  default_prompt: "Use $review-procurement-document to review a procurement document with traceable evidence."

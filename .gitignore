@@ -1,0 +1,15 @@
+src/config.json
+runs/
+__pycache__/
+*.pyc
+.env
+.venv/
+node_modules/
+.npm-cache/
+dist/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+backend/tests/*.db
+backend/.uv-cache/
+backend/data/*.tmp

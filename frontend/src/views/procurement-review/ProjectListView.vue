@@ -1,0 +1,14 @@
+<script setup lang="ts">
+import { onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import BaseModal from '../../components/base/BaseModal.vue'
+import { apiErrorMessage } from '../../services/http'
+import { createProject, listProjects, usingMockProcurementService } from '../../services/procurement-review'
+import type { Project } from '../../types/procurement-review'
+const router = useRouter(); const projects = ref<Project[]>([]); const loading = ref(true); const showCreate = ref(false); const error = ref(''); const pending = ref(false)
+const form = ref({ name: '', project_code: '', handling_department: '采购业务部', project_owner: '' })
+async function load() { loading.value = true; error.value = ''; try { projects.value = await listProjects() } catch (reason) { error.value = apiErrorMessage(reason) } finally { loading.value = false } }
+async function submit() { pending.value = true; try { const project = await createProject(form.value); showCreate.value = false; router.push({ name: 'procurement-project', params: { projectId: project.id } }) } catch (reason) { error.value = apiErrorMessage(reason) } finally { pending.value = false } }
+onMounted(load)
+</script>
+<template><section class="page-head"><p class="crumb">审查任务 / 项目列表</p><div class="title-row"><div><h1>采购项目</h1><p>先建立项目，再在项目内发起采购文件审查子任务。</p></div><button class="button primary" @click="showCreate = true">新建项目</button></div></section><section class="page-body"><p v-if="usingMockProcurementService" class="integration-note">当前为 mock 模式；鉴权仍使用真实接口。</p><div v-if="loading" class="state-card">正在加载项目…</div><div v-else-if="error" class="state-card error-state">{{ error }} <button class="button" @click="load">重试</button></div><div v-else-if="!projects.length" class="state-card">暂无项目。请先新建项目。</div><div v-else class="project-grid"><button v-for="project in projects" :key="project.id" class="project-card" @click="router.push({ name: 'procurement-project', params: { projectId: project.id } })"><span class="project-number">{{ project.project_code }}</span><h2>{{ project.name }}</h2><p>{{ project.handling_department }} · {{ project.project_owner }}</p><span class="status-chip active">进行中</span></button></div></section><BaseModal v-if="showCreate" title="新建采购项目" @close="showCreate = false"><form class="form-grid" @submit.prevent="submit"><label>项目名称<input v-model.trim="form.name" required /></label><label>项目编号<input v-model.trim="form.project_code" required /></label><label>经办部门<input v-model.trim="form.handling_department" required /></label><label>项目负责人<input v-model.trim="form.project_owner" required /></label><div class="modal-actions"><button type="button" class="button" @click="showCreate = false">取消</button><button class="button primary" :disabled="pending">{{ pending ? '创建中…' : '创建项目' }}</button></div></form></BaseModal></template>

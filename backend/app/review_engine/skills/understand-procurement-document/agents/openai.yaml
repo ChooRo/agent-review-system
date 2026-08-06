@@ -1,0 +1,4 @@
+interface:
+  display_name: "采购文件理解"
+  short_description: "Extract traceable procurement requirement candidates"
+  default_prompt: "Use $understand-procurement-document to extract traceable procurement requirement candidates from this document."
