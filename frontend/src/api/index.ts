@@ -10,7 +10,7 @@ export function apiErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : '请求失败，请稍后重试。'
 }
 
-export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
+export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = localStorage.getItem('access_token')
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...options,
@@ -22,12 +22,21 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   })
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: '服务暂时不可用' }))
-    const message = Array.isArray(error.detail) ? error.detail.map((item: { msg?: string }) => item.msg).filter(Boolean).join('；') : error.detail
+    const detail = Array.isArray(error.detail)
+      ? error.detail.map((item: { msg?: string }) => item.msg).filter(Boolean).join('；')
+      : error.detail
     const requestId = response.headers.get('X-Request-ID')
-    const typed = new Error(message ?? '请求失败') as Error & { status?: number; request_id?: string }
-    typed.status = response.status; typed.request_id = requestId ?? undefined
-    if (response.status === 401) { localStorage.removeItem('access_token'); if (location.pathname !== '/login') location.assign('/login') }
+    const typed = new Error(detail ?? '请求失败') as Error & { status?: number; request_id?: string }
+    typed.status = response.status
+    typed.request_id = requestId ?? undefined
+    if (response.status === 401) {
+      localStorage.removeItem('access_token')
+      if (location.pathname !== '/login') location.assign('/login')
+    }
     throw typed
   }
   return response.json() as Promise<T>
 }
+
+const key = () => crypto.randomUUID()
+export { key as idempotencyKey }

@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import FindingCard from '../../components/business/FindingCard.vue'
-import { confirmTask, createCollaborativeComment, getEvents, getFindings, getTask, saveDisposition, savePrimaryDecision, submitTask, updateCollaborativeComment } from '../../services/procurement-review'
+import { confirmTask, createCollaborativeComment, getEvents, getFindings, getTask, saveDisposition, savePrimaryDecision, submitTask, updateCollaborativeComment } from '../../api/procurement-review'
 import { useAuthStore } from '../../stores/auth'
 import type { Finding, ReviewTask, RiskLevel } from '../../types/procurement-review'
 

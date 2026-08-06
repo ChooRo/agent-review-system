@@ -1,14 +1,14 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
-import { api } from '../services/http'
+import { request } from '../api'
 import type { LoginResponse, User } from '../types/auth'
 
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<User | null>(null)
 
   async function login(username: string, password: string) {
-    const result = await api<LoginResponse>('/auth/login', {
+    const result = await request<LoginResponse>('/auth/login', {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     })
@@ -19,7 +19,7 @@ export const useAuthStore = defineStore('auth', () => {
   async function restore() {
     if (!localStorage.getItem('access_token')) return false
     try {
-      user.value = await api<User>('/auth/me')
+      user.value = await request<User>('/auth/me')
       return true
     } catch {
       logout()

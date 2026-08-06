@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { getEvents, getTask, usingMockProcurementService } from '../../services/procurement-review'
+import { getEvents, getTask } from '../../api/procurement-review'
 import type { ReviewTask } from '../../types/procurement-review'
 
 const route = useRoute()
@@ -17,15 +17,9 @@ async function load() {
     const taskId = String(route.params.taskId)
     const serverTask = await getTask(projectId, taskId)
     if (!serverTask) return
-    if (usingMockProcurementService && task.value?.status === 'parsing') {
-      serverTask.progress = Math.min(100, (task.value.progress ?? 0) + 20)
-      if (serverTask.progress >= 100) serverTask.status = 'reviewing'
-    }
     task.value = serverTask
-    if (!usingMockProcurementService) {
-      const events = await getEvents(projectId, taskId, lastEventId)
-      lastEventId = events.at(-1)?.id ?? lastEventId
-    }
+    const events = await getEvents(projectId, taskId, lastEventId)
+    lastEventId = events.at(-1)?.id ?? lastEventId
   } catch {
     error.value = '进度读取失败，请稍后重试。'
   }

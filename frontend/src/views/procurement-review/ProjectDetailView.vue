@@ -2,8 +2,8 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import BaseModal from '../../components/base/BaseModal.vue'
-import { apiErrorMessage } from '../../services/http'
-import { createTask, getProject, listTasks } from '../../services/procurement-review'
+import { apiErrorMessage } from '../../api'
+import { createTask, getProject, listTasks } from '../../api/procurement-review'
 import type { Project, ReviewTask } from '../../types/procurement-review'
 
 const route = useRoute()

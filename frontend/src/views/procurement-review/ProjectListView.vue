@@ -2,8 +2,8 @@
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import BaseModal from '../../components/base/BaseModal.vue'
-import { apiErrorMessage } from '../../services/http'
-import { createProject, listProjects, usingMockProcurementService } from '../../services/procurement-review'
+import { apiErrorMessage } from '../../api'
+import { createProject, listProjects } from '../../api/procurement-review'
 import type { Project } from '../../types/procurement-review'
 
 const router = useRouter()
@@ -46,9 +46,7 @@ onMounted(load)
 
   <!-- Page Body -->
   <div class="page-body">
-    <p v-if="usingMockProcurementService" class="note" style="margin:0 0 14px">当前为 mock 模式；鉴权仍使用真实接口。</p>
-
-    <div v-if="loading" class="state-card">正在加载项目…</div>
+    <p v-if="loading" class="state-card">正在加载项目…</p>
     <div v-else-if="error" class="state-card error-state">
       {{ error }}
       <button class="btn" style="margin-left:12px" @click="load">重试</button>
