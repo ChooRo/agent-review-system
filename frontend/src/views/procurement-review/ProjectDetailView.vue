@@ -164,7 +164,7 @@ onMounted(load)
       <div class="step-dot on">1 · 选择审查类型</div>
       <div class="step-dot">2 · 上传文件</div>
     </div>
-    <div style="display:flex;flex-direction:column;gap:9px">
+    <div class="task-type-grid">
       <button class="task-type-option" @click="selectType('single')">
         <b>采购文件合规性审查</b>
         <span>上传采购文件，检查制度、条款和附件的合规性。</span>

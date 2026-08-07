@@ -448,6 +448,9 @@ table.tbl {
 .no { color: var(--ring); }
 
 /* ===== Task Type Options (create task modal) ===== */
+.task-type-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+}
 .task-type-option {
   display: block; width: 100%; padding: 14px 16px;
   border: 1px solid var(--border2); border-radius: 12px;
