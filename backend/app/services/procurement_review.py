@@ -12,7 +12,9 @@ from fastapi import HTTPException, UploadFile
 from app.core.auth_store import AuthStore
 from app.core.config import get_settings
 from app.repositories.review_repository import ReviewRepository
-from app.review_engine.mock_runner import run_procurement_mock
+import threading
+
+from app.services.procurement_workflow import run_review_workflow
 
 STATES = {"draft", "queued", "parsing", "reviewing", "operator_review", "primary_review", "primary_recheck", "completed", "failed", "cancelled"}
 ALLOWED_TYPES = {".pdf": {"application/pdf"}, ".doc": {"application/msword", "application/octet-stream"}, ".docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/zip", "application/octet-stream"}}
@@ -93,18 +95,80 @@ class ProcurementReviewService:
         if replay: return replay
         if not task["document"]: fail(400, "请先上传采购文件")
         if task["status"] not in {"draft", "failed"}: fail(409, "任务已启动")
+        previous_run_id = task.get("engine_run_id")
+        task.pop("error", None)
+        task["execution_mode"] = get_settings().review_execution_mode
         for state in ("queued", "parsing", "reviewing"):
             self._transition(task, user, state, "启动审查")
-        try:
-            candidates = run_procurement_mock(task["document"]["path"])
-            findings = self.findings.read()
-            for candidate in candidates:
-                findings["items"].append({"id": uid("fdg"), "task_id": task_id, "source_type": "ai", "risk_level": candidate["risk_level"], "title": candidate["title"], "description": candidate["description"], "suggestion": candidate["recommendation"], "source": candidate["source"], "rule_refs": candidate["rule_refs"], "version": 1})
-            self.findings.write(findings)
-            task["status"] = "operator_review"; task["progress"] = 100; task["updated_at"] = now(); task["version"] += 1; self._event(task, user, "reviewing", "operator_review", "审查完成，等待经办处置")
-        except Exception as exc:
-            task["status"] = "failed"; task["progress"] = 0; task["error"] = str(exc); task["updated_at"] = now(); task["version"] += 1; self._event(task, user, "reviewing", "failed", f"审查失败：{exc}")
-        self.tasks.write(data); return self._remember(key, self._task_out(task, user))
+        task["progress"] = 5; task["updated_at"] = now(); task["version"] += 1
+        self.tasks.write(data)
+        outcome = self._remember(key, self._task_out(task, user))
+        thread = threading.Thread(
+            target=run_review_workflow,
+            args=(project_id, task_id, task["document"]["path"], self._store_review_results, self._fail_review_task, self._update_review_progress, previous_run_id),
+            daemon=True,
+        )
+        thread.start()
+        return outcome
+
+    def _store_review_results(self, project_id: str, task_id: str, report: dict) -> None:
+        def persist(state: dict) -> None:
+            task = next((t for t in state["tasks"] if t["id"] == task_id), None)
+            if not task:
+                return
+            for finding in report.get("findings", []):
+                evidence = finding.get("evidence") or []
+                first = evidence[0] if evidence else {}
+                source_info = {
+                    "page": first.get("page_no"),
+                    "section_path": first.get("heading_path", []),
+                    "quote": (first.get("quote") or finding.get("description", ""))[:500],
+                    "block_id": ",".join(finding.get("evidence_block_ids", [])[:5]),
+                }
+                legal_refs = [{"legal_unit_id": u.get("legal_unit_id"), "document_title": u.get("document_title"), "article_no": u.get("article_no"), "quote": u.get("quote") or u.get("text"), "page": u.get("page") or u.get("page_no")} for u in finding.get("legal_evidence", [])[:10]]
+                rule_refs = [{"id": rule_id} for rule_id in finding.get("rule_ids", []) if rule_id]
+                state["findings"].append({
+                    "id": uid("fdg"), "task_id": task_id, "source_type": "ai",
+                    "risk_level": finding.get("risk_level", "unknown"),
+                    "title": finding.get("title", "审查发现"),
+                    "description": finding.get("description", ""),
+                    "suggestion": finding.get("recommendation", ""),
+                    "source": source_info, "rule_refs": rule_refs, "legal_refs": legal_refs, "version": 1,
+                })
+            task["status"] = "operator_review"; task["progress"] = 100; task["updated_at"] = now(); task["version"] += 1
+            task["execution_mode"] = report.get("execution_mode", "unknown")
+            task["engine_run_id"] = report.get("engine_run_id", task.get("engine_run_id"))
+            task.pop("error", None)
+            task["quality"] = report.get("quality", {"status": "unknown"})
+            state["audit"].append({"id": uid("aud"), "actor_id": "system", "action": "review_completed", "target_id": task_id, "at": now(), "details": {}})
+        self.repository.transaction(persist)
+
+    def _fail_review_task(self, project_id: str, task_id: str, error_msg: str) -> None:
+        def persist(state: dict) -> None:
+            task = next((t for t in state["tasks"] if t["id"] == task_id), None)
+            if not task: return
+            task["status"] = "failed"; task["error"] = error_msg; task["updated_at"] = now(); task["version"] += 1
+            state["audit"].append({"id": uid("aud"), "actor_id": "system", "action": "review_failed", "target_id": task_id, "at": now(), "details": {"error": error_msg}})
+        self.repository.transaction(persist)
+
+    def _update_review_progress(self, project_id: str, task_id: str, run_id: str, step: str | None, completed: int, total: int) -> None:
+        def persist(state: dict) -> None:
+            task = next((t for t in state["tasks"] if t["id"] == task_id and t["project_id"] == project_id), None)
+            if not task:
+                return
+            task["engine_run_id"] = run_id
+            task["execution_mode"] = "live"
+            task["progress"] = max(task.get("progress", 5), 5 + completed * 90 // total)
+            task["updated_at"] = now()
+            task["version"] += 1
+            if step:
+                state["events"].append({"id": uid("evt"), "task_id": task_id, "actor_id": 0, "at": now(), "before_status": task["status"], "after_status": task["status"], "reason": f"审查引擎阶段完成：{step}"})
+        self.repository.transaction(persist)
+
+    def _audit_impl(self, task_id: str, user_id: str, action: str, target_id: str, details: dict | None = None) -> None:
+        data = self.audit.read()
+        data["items"].append({"id": uid("aud"), "actor_id": user_id, "action": action, "target_id": target_id, "at": now(), "details": details or {}})
+        self.audit.write(data)
 
     def findings_for_task(self, project_id: str, task_id: str, user: dict) -> list[dict]:
         self.get_task(project_id, task_id, user); return [self._finding_out(x) for x in self.findings.read()["items"] if x["task_id"] == task_id]
@@ -187,13 +251,13 @@ class ProcurementReviewService:
         if key: data = self.keys.read(); data["items"].append({"key": key, "response": response}); self.keys.write(data)
         return response
     def _finding_out(self, finding: dict) -> dict:
-        return {**finding, "recheck_required": finding.get("recheck_required", False), "collaborative_comments": [x for x in self.comments.read()["items"] if x["finding_id"] == finding["id"]]}
+        return {**finding, "rule_refs": finding.get("rule_refs", []), "legal_refs": finding.get("legal_refs", []), "recheck_required": finding.get("recheck_required", False), "collaborative_comments": [x for x in self.comments.read()["items"] if x["finding_id"] == finding["id"]]}
     def _task_out(self, task: dict, user: dict) -> dict:
         role = next((x for x in task["members"] if x["user_id"] == user["id"]), None)
         rows = [x for x in self.findings.read()["items"] if x["task_id"] == task["id"]]
         summary = {"total": len(rows), "high": sum(x["risk_level"] == "high" for x in rows), "medium": sum(x["risk_level"] == "medium" for x in rows), "low": sum(x["risk_level"] == "low" for x in rows), "pending": sum(not x.get("primary_decision") for x in rows)}
         document = task.get("document")
         if document: document = {k: v for k, v in document.items() if k != "path"}
-        return {**task, "document": document, "finding_summary": summary, "progress": task.get("progress", 0), "task_role": role["task_role"] if role else None, "module_scope": role["module_scope"] if role else []}
+        return {**task, "document": document, "finding_summary": summary, "progress": task.get("progress", 0), "task_role": role["task_role"] if role else None, "module_scope": role["module_scope"] if role else [], "execution_mode": task.get("execution_mode", "pending"), "quality": task.get("quality", {"status": "pending"}), "error": task.get("error")}
     def _project_out(self, project: dict, user: dict, tasks: list[dict]) -> dict:
         return {**project, "task_summaries": [self._task_out(x, user) for x in tasks]}

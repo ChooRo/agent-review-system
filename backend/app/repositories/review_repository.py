@@ -1,6 +1,7 @@
 """Repository contract and JSON implementation for procurement-review business data."""
 
 from pathlib import Path
+import threading
 from typing import Any
 
 from app.repositories.json_store import JsonStore
@@ -10,6 +11,7 @@ class ReviewRepository:
     """Single business-data boundary; services never open JSON files directly."""
 
     collections = ("projects", "tasks", "findings", "comments", "events", "audit", "idempotency")
+    _lock = threading.RLock()
 
     def __init__(self, root: Path) -> None:
         self._store = JsonStore(root / "review_data.json")
@@ -20,6 +22,13 @@ class ReviewRepository:
 
     def commit(self, value: dict[str, list[dict[str, Any]]]) -> None:
         self._store.write({"schema_version": 1, **{name: value.get(name, []) for name in self.collections}})
+
+    def transaction(self, mutate) -> None:
+        """Commit related task/findings/audit changes as one atomic JSON replacement."""
+        with self._lock:
+            state = self.load()
+            mutate(state)
+            self.commit(state)
 
     def collection(self, name: str) -> "ReviewCollection":
         if name not in self.collections:

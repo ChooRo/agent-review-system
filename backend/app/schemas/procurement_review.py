@@ -61,6 +61,7 @@ class FindingOut(BaseModel):
     suggestion: str
     source: dict
     rule_refs: list[dict] = []
+    legal_refs: list[dict] = []
     operator_disposition: dict | None = None
     primary_decision: dict | None = None
     recheck_required: bool = False
@@ -88,6 +89,10 @@ class TaskOut(BaseModel):
     progress: int = Field(ge=0, le=100)
     task_role: str | None = None
     module_scope: list[str] = []
+    execution_mode: str = "pending"
+    quality: dict = {}
+    engine_run_id: str | None = None
+    error: str | None = None
     version: int
     created_at: str
     updated_at: str

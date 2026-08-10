@@ -68,17 +68,17 @@ class MinerUService:
         """调用MinerU /file_parse接口，安全解压ZIP并返回content_list。"""
         endpoint = f"{self.api_url}/file_parse"
         fields = {
-            "backend": "pipeline",
-            "parse_method": "auto",
-            "lang_list": "ch",
-            "table_enable": "true",
-            "return_content_list": "true",
-            "return_images": "true",
+            "backend": "pipeline", "parse_method": "auto", "lang_list": "ch",
+            "table_enable": "true", "return_content_list": "true", "return_images": "true",
             "response_format_zip": "true",
         }
         mime = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
-        with source.open("rb") as handle, httpx.Client(timeout=self.timeout_seconds) as client:
-            response = client.post(endpoint, data=fields, files={"files": (source.name, handle, mime)})
+        # MinerU is a local service. Do not let workstation proxy variables route
+        # its IPv6 loopback request through a gateway.
+        with source.open("rb") as handle, httpx.Client(timeout=self.timeout_seconds, trust_env=False) as client:
+            multipart = [(name, (None, value)) for name, value in fields.items()]
+            multipart.append(("files", (source.name, handle, mime)))
+            response = client.post(endpoint, files=multipart)
         response.raise_for_status()
         extract_dir = output_dir / "mineru"
         extract_dir.mkdir(parents=True, exist_ok=True)

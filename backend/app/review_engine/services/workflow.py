@@ -37,16 +37,19 @@ ID_PREFIX = {"procurement": "REQ"}
 
 class WorkflowEngine:
     """执行九步审查流水线，并在每一步完成后保存可恢复检查点。"""
+    # ponytail: keep this migrated workflow intact for traceability; split parse/ledger/review stages only after their backend contracts stabilize.
 
     def __init__(
         self,
         runs_root: Path,
         skills_path: Path,
         config: dict[str, Any] | None = None,
+        progress_callback: Callable[[RunStore, dict[str, Any], str | None], None] | None = None,
     ):
         self.runs_root = runs_root.resolve()
         self.skills = read_json(skills_path)
         self.config = config or {}
+        self.progress_callback = progress_callback
         formal_root = skills_path.parent / "skills"
         self.formal_skills = {
             "structure": load_formal_skill(formal_root / "understand-document-structure"),
@@ -95,6 +98,8 @@ class WorkflowEngine:
         state["status"] = "running"
         state["error"] = None
         store.save_state(state)
+        if self.progress_callback:
+            self.progress_callback(store, state, None)
         for index, step in enumerate(STEPS, start=1):
             state = store.load_state()
             if step in state["completed_steps"]:
@@ -112,6 +117,8 @@ class WorkflowEngine:
                 state["error"] = None
                 duration = round(time.perf_counter() - started, 3)
                 store.save_state(state)
+                if self.progress_callback:
+                    self.progress_callback(store, state, step)
                 store.event(
                     "INFO",
                     step,

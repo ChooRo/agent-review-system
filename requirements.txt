@@ -1,5 +1,2 @@
-fastapi
-httpx
-openai
-pydantic
-uvicorn
+# 依赖唯一入口：backend/pyproject.toml 与 backend/uv.lock。
+# 请在 backend/ 下执行：uv sync --dev

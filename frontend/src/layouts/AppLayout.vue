@@ -49,6 +49,11 @@ const activeRoutes: Record<string, string[]> = {
   perm: ['admin-users'],
 }
 
+// Review and the knowledge base are live in this release. The remaining entries
+// stay visible to preserve the Demo information architecture, but never navigate
+// to a placeholder route from the sidebar.
+const disabledNavIds = new Set(['rereview', 'archive', 'cases', 'fix', 'perm'])
+
 // SVG icons (Lucide-style)
 const icons: Record<string, string> = {
   leaf: '<path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10Z"/><path d="M2 21c0-3 1.85-5.36 5.08-6"/>',
@@ -76,6 +81,7 @@ function isActive(navId: string) {
 }
 
 function navClick(item: { id: string; to: string }) {
+  if (disabledNavIds.has(item.id)) return
   router.push(item.to)
 }
 
@@ -124,11 +130,14 @@ function logout() {
             v-for="item in section.items"
             :key="item.id"
             class="navitem"
-            :class="{ on: isActive(item.id) }"
+            :class="{ on: isActive(item.id), locked: disabledNavIds.has(item.id) }"
+            :disabled="disabledNavIds.has(item.id)"
+            :title="disabledNavIds.has(item.id) ? '暂未开放' : undefined"
             @click="navClick(item)"
           >
             <span class="ic" v-html="iconSvg(item.icon, 17)"></span>
             {{ item.label }}
+            <small v-if="disabledNavIds.has(item.id)" class="un">暂未开放</small>
           </button>
         </template>
       </nav>

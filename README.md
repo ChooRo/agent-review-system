@@ -11,18 +11,18 @@
 - Agent Tool规格：[docs/spec/feature/agent-tools.md](./docs/spec/feature/agent-tools.md)
 - 文档理解当前规格：[docs/spec/feature/document-understanding.md](./docs/spec/feature/document-understanding.md)
 - Tool接口契约：[docs/spec/api/tool-contracts.md](./docs/spec/api/tool-contracts.md)
-- 正式Skill目录：[src/skills](./src/skills)
+- 正式且唯一的运行时审查引擎：[backend/app/review_engine](./backend/app/review_engine)
 - MVP运行与监控：[docs/MVP.md](./docs/MVP.md)
 - 架构决策：[docs/ADR/ADR.md](./docs/ADR/ADR.md)
 
-`src/`是按照当前方案重新实现的独立MVP，不引用项目旧`backend/`代码。运行产物写入`runs/<run_id>/`，可以逐步查看、暂停和恢复。
+`backend/app/review_engine/` 是当前唯一权威的审查引擎实现；根目录历史 `src/` 不再作为运行入口。运行产物写入 `runs/<run_id>/`，由后端服务管理。
 
 当前已正式化并接入运行时的Skill：
 
 - `understand-document-structure`
 - `understand-procurement-document`
 
-响应文件理解、合同理解及三个审查Agent仍使用`src/skills.json`中的临时配置，后续逐项迁移为正式Skill。
+响应文件理解、合同理解及相关审查能力尚未开放；当前仅运行采购文件单文件审查。
 
 ## 当前开发入口（2026-08-06）
 
@@ -33,4 +33,8 @@
 - 前后端对接文档：[docs/FRONTEND_BACKEND_INTEGRATION.md](./docs/FRONTEND_BACKEND_INTEGRATION.md)
 - 开发交接文档：[docs/DEVELOPMENT_HANDOFF.md](./docs/DEVELOPMENT_HANDOFF.md)
 
-响应文件审核、合同审核、知识治理等入口在前端中保持禁用，待采购文件审核闭环完成后按交接文档扩展。
+响应文件审核和合同审核入口保持禁用。知识库当前提供法规文档及法规知识单元的只读检索；可执行审查规则的治理、发布与写入流程尚未开放，`/knowledge/rules` 因而返回空列表。
+
+## 测试
+
+唯一权威测试入口：`cd backend && uv run --no-sync pytest -q`。

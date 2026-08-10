@@ -5,9 +5,10 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from typing import Any
 
-from openai import BadRequestError, OpenAI
+import httpx
 
 from .runtime import RunStore, write_json
 
@@ -19,19 +20,16 @@ class LLMService:
         self.mode = mode
         self.store = store
         self.model = str(config.get("model") or "mock-model")
+        self.max_retries = int(config.get("max_retries", 0))
         self._trace_lock = threading.Lock()
-        self.client = None
+        self.client: httpx.Client | None = None
         if mode == "live":
             api_url = str(config.get("api_url") or "").rstrip("/")
             api_key = str(config.get("api_key") or "")
             if not api_url or not api_key or not config.get("model"):
                 raise ValueError("live模式必须配置api_url、api_key和model")
-            self.client = OpenAI(
-                api_key=api_key,
-                base_url=api_url,
-                timeout=float(config.get("timeout_seconds", 120)),
-                max_retries=int(config.get("max_retries", 0)),
-            )
+            self.client = httpx.Client(base_url=api_url, timeout=float(config.get("timeout_seconds", 120)))
+            self.api_key = api_key
 
     def json_call(
         self,
@@ -60,21 +58,24 @@ class LLMService:
             return mock_result
 
         try:
-            try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    temperature=0,
-                    response_format={"type": "json_object"},
-                    messages=request_body["messages"],
-                )
-            except BadRequestError:
-                # 部分OpenAI-compatible服务不接受response_format，仍用提示词约束JSON。
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    temperature=0,
-                    messages=request_body["messages"],
-                )
-            content = response.choices[0].message.content or ""
+            for attempt in range(self.max_retries + 1):
+                try:
+                    response = self.client.post(
+                        "/chat/completions",
+                        json={**request_body, "response_format": {"type": "json_object"}},
+                        headers={"Authorization": f"Bearer {self.api_key}"},
+                    )
+                    response.raise_for_status()
+                    break
+                except httpx.TimeoutException:
+                    if attempt >= self.max_retries:
+                        raise
+                except httpx.HTTPStatusError as exc:
+                    status = exc.response.status_code
+                    if attempt >= self.max_retries or (status != 429 and status < 500):
+                        raise
+                time.sleep(min(2**attempt, 2))
+            content = response.json()["choices"][0]["message"].get("content") or ""
             result = parse_json_object(content)
             write_json(trace_path, {"mode": "live", "request": request_body, "response": content})
             return result

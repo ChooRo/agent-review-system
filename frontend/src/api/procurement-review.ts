@@ -28,6 +28,13 @@ export function getTask(projectId: string, taskId: string): Promise<ReviewTask> 
   return request(taskPath(projectId, taskId))
 }
 
+export function retryTask(projectId: string, taskId: string): Promise<ReviewTask> {
+  return request(`${taskPath(projectId, taskId)}/start`, {
+    method: 'POST',
+    headers: { 'Idempotency-Key': idempotencyKey() },
+  })
+}
+
 export function createTask(projectId: string, title: string, file: File): Promise<ReviewTask> {
   return request<ReviewTask>(taskPath(projectId), {
     method: 'POST',
@@ -49,8 +56,15 @@ export function getEvents(projectId: string, taskId: string, after?: string): Pr
   return request(`${taskPath(projectId, taskId)}/events${after ? `?after=${encodeURIComponent(after)}` : ''}`)
 }
 
-export function getFindings(projectId: string, taskId: string): Promise<Finding[]> {
-  return request(`${taskPath(projectId, taskId)}/findings`)
+export async function getFindings(projectId: string, taskId: string): Promise<Finding[]> {
+  const findings = await request<Finding[]>(`${taskPath(projectId, taskId)}/findings`)
+  // Older task records were created before legal_refs was introduced.
+  return findings.map((finding) => ({
+    ...finding,
+    legal_refs: finding.legal_refs ?? [],
+    rule_refs: finding.rule_refs ?? [],
+    collaborative_comments: finding.collaborative_comments ?? [],
+  }))
 }
 
 export function saveDisposition(

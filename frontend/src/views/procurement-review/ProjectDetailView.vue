@@ -63,7 +63,7 @@ async function submit() {
 }
 
 function taskAction(task: ReviewTask) {
-  if (task.status === 'parsing' || task.status === 'reviewing') {
+  if (task.status === 'parsing' || task.status === 'reviewing' || task.status === 'failed') {
     router.push({ name: 'procurement-progress', params: { projectId: projectId.value, taskId: task.id } })
   } else {
     router.push({ name: 'procurement-workbench', params: { projectId: projectId.value, taskId: task.id } })
@@ -72,6 +72,7 @@ function taskAction(task: ReviewTask) {
 
 function statusClass(status: string) {
   if (status === 'completed' || status === 'cancelled') return 'done'
+  if (status === 'failed') return 'done'
   if (status === 'parsing' || status === 'reviewing') return 'doing'
   return 'todo'
 }
@@ -106,7 +107,7 @@ onMounted(load)
         <div class="project-task-head">
           <div>
             <div class="project-task-title">子任务列表</div>
-            <div class="project-task-meta">{{ project.project_code }} · {{ project.project_owner }}</div>
+            <div class="project-task-meta">{{ project.project_code }} · {{ project.project_owner }} · 更新 {{ project.updated_at?.slice(0, 10) ?? '—' }}</div>
           </div>
           <div class="project-progress">
             <b>{{ tasks.filter(t => t.status === 'completed').length }} / {{ tasks.length }}</b>
@@ -114,30 +115,53 @@ onMounted(load)
           </div>
         </div>
 
-        <div class="subtask-table-head">
-          <span>子任务</span>
-          <span>状态</span>
-          <span>风险 / 结果</span>
-          <span>更新时间</span>
-          <span>操作</span>
-        </div>
+        <div class="subtask-list subtask-list-page">
+          <div class="subtask-table-head">
+            <span>子任务</span>
+            <span>状态</span>
+            <span>风险 / 结果</span>
+            <span>更新时间</span>
+            <span>操作</span>
+          </div>
 
-        <div
-          v-for="task in tasks"
-          :key="task.id"
-          class="subtask-row"
-        >
-          <div>
-            <div class="subtask-name">{{ task.title }}</div>
-            <div class="project-task-meta">{{ task.document?.file_name ?? '尚未上传文件' }} · {{ task.created_at?.slice(0, 10) }}</div>
-          </div>
-          <div>
-            <span class="pill" :class="statusClass(task.status)">{{ statusLabel[task.status] ?? task.status }}</span>
-          </div>
-          <div class="subtask-result">{{ task.status === 'completed' ? '审查完成' : '—' }}</div>
-          <div class="subtask-result">{{ task.created_at?.slice(0, 10) ?? '—' }}</div>
-          <div class="task-row-actions">
-            <button class="btn" @click="taskAction(task)">查看</button>
+          <div
+            v-for="task in tasks"
+            :key="task.id"
+            class="subtask-row"
+            :class="task.status === 'failed' ? 'task-rectify' : 'task-review'"
+          >
+            <div>
+              <div class="subtask-name">{{ task.title }}</div>
+              <div class="project-task-meta">{{ task.document?.file_name ?? '尚未上传文件' }} · {{ task.created_at?.slice(0, 10) }}</div>
+            </div>
+            <div class="subtask-status-cell">
+              <span class="pill" :class="statusClass(task.status)">{{ statusLabel[task.status] ?? task.status }}</span>
+              <div v-if="task.status === 'reviewing' || task.status === 'parsing'" class="subtask-progress">
+                <i :style="{ width: `${task.progress ?? 0}%` }"></i>
+              </div>
+              <div v-if="task.status === 'reviewing' || task.status === 'parsing'" class="subtask-progress-meta">
+                <span>正在审查</span><b>{{ task.progress ?? 0 }}%</b>
+              </div>
+            </div>
+            <div class="subtask-result">
+              <template v-if="task.status === 'failed'"><strong>{{ task.error?.slice(0, 40) || '处理失败' }}</strong></template>
+              <template v-else-if="task.status === 'completed'">审查完成</template>
+              <template v-else>—</template>
+            </div>
+            <div class="subtask-result">{{ task.updated_at?.slice(0, 10) ?? task.created_at?.slice(0, 10) ?? '—' }}</div>
+            <div class="task-row-actions">
+              <button
+                class="btn"
+                :class="{ pri: task.status !== 'completed' && task.status !== 'parsing' && task.status !== 'reviewing' }"
+                :disabled="task.status === 'parsing' || task.status === 'reviewing'"
+                @click="taskAction(task)"
+              >
+                <template v-if="task.status === 'parsing' || task.status === 'reviewing'">处理中</template>
+                <template v-else-if="task.status === 'completed'">查看</template>
+                <template v-else-if="task.status === 'failed'">重试</template>
+                <template v-else>进入</template>
+              </button>
+            </div>
           </div>
         </div>
       </div>

@@ -46,8 +46,7 @@ const router = createRouter({
         {
           path: 'knowledge',
           name: 'knowledge',
-          component: () => import('../views/procurement-review/LockedFeatureView.vue'),
-          props: { title: '知识库', detail: '知识治理能力暂未开放。' },
+          component: () => import('../views/knowledge/KnowledgeView.vue'),
         },
         {
           path: 'cases',

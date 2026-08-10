@@ -1,4 +1,4 @@
-src/config.json
+backend/review_config.json
 runs/
 __pycache__/
 *.pyc

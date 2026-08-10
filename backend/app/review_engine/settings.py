@@ -9,7 +9,7 @@ from typing import Any
 
 
 DEFAULTS: dict[str, Any] = {
-    "mineru": {"api_url": "http://127.0.0.1:8000", "timeout_seconds": 900},
+    "mineru": {"api_url": "http://127.0.0.1:8001", "timeout_seconds": 900},
     "llm": {"api_url": "", "api_key": "", "model": "", "timeout_seconds": 120, "max_retries": 0},
     "rules": {"path": None, "knowledge_root": "../../../knowledge/rules"},
     "workflow": {"extract_workers": 3},
