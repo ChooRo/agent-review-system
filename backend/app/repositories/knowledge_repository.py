@@ -21,6 +21,7 @@ class KnowledgeRepository:
     def _metadata(value: dict[str, Any], fallback_key: str = "") -> dict[str, Any]:
         """Provide backward-compatible document metadata without rewriting old files."""
         doc = dict(value.get("legal_document", {}))
+        extracted = value.get("metadata_extraction", {}).get("basic_information", {})
         return {
             **doc,
             "document_key": doc.get("document_key") or fallback_key,
@@ -33,7 +34,7 @@ class KnowledgeRepository:
             "metadata_version": int(doc.get("metadata_version") or 1),
             "updated_at": doc.get("updated_at"),
             "updated_by": str(doc["updated_by"]) if doc.get("updated_by") is not None else None,
-            "canonical_title": doc.get("canonical_title") or doc.get("title") or fallback_key,
+            "canonical_title": doc.get("canonical_title") or extracted.get("canonical_title") or doc.get("title") or fallback_key,
             "legal_level": doc.get("legal_level") or "other",
             "document_number": doc.get("document_number"),
             "adoption_date": doc.get("adoption_date"),
@@ -62,6 +63,7 @@ class KnowledgeRepository:
         return {
             "document_key": doc["document_key"],
             "title": doc["title"],
+            "canonical_title": doc.get("canonical_title"),
             "issuer": doc.get("issuer"),
             "effective_date": doc.get("effective_date"),
             "expiry_date": doc["expiry_date"],

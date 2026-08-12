@@ -3,6 +3,7 @@ import { request } from './index'
 export interface KnowledgeListItem {
   document_key: string
   title: string
+  canonical_title?: string
   issuer?: string
   effective_date?: string
   status?: string
@@ -66,6 +67,7 @@ export interface MetadataExtraction {
   applicability?: LegalApplicability
   updated_at?: string
   error?: string
+  audit?: { parser?: { tool?: string; input?: string; output?: string }; calls?: { file: string; model?: string; skill?: string; tool?: string; input_summary?: string; output_summary?: string; status?: string; error?: string }[] }
 }
 
 export interface LegalUnit {

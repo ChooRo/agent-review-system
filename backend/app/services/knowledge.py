@@ -45,7 +45,22 @@ class KnowledgeService:
         value = self.repository.get_document(key)
         if not value or not knowledge_policy.can_view_knowledge_document(user, value["legal_document"]):
             raise HTTPException(404, "legal knowledge document not found")
+        value["metadata_extraction"] = self._metadata_audit(value, value.get("metadata_extraction", {}), key)
         return value
+
+    @staticmethod
+    def _metadata_audit(value: dict[str, Any], extraction: dict[str, Any], key: str) -> dict[str, Any]:
+        traces = Path(__file__).resolve().parents[3] / "knowledge" / "rules" / key / "metadata_extraction" / "llm_traces"
+        calls = []
+        for path in sorted(traces.glob("legal_metadata_*.json")) if traces.is_dir() else []:
+            try:
+                trace = JsonStore(path).read(); request = trace.get("request", {}); messages = request.get("messages", [])
+                payload = messages[-1].get("content", "") if messages else ""
+                response = trace.get("response")
+                calls.append({"file": path.name, "model": request.get("model"), "skill": "extract-legal-applicability-profile", "tool": "LLMService.json_call", "input_summary": f"候选法规条款 {payload.count('legal_unit_id')} 条", "output_summary": "已返回 applicability JSON" if response else "调用失败", "status": "success" if response else "failed", "error": trace.get("error")})
+            except (OSError, ValueError, TypeError):
+                continue
+        return {**extraction, "audit": {"parser": {"tool": "MinerUService", "input": value.get("legal_document", {}).get("source_file"), "output": "document.json + legal_knowledge.json"}, "calls": calls}}
 
     def rules(self, keyword: str | None, _user: dict) -> list[dict]:
         return self.repository.applicable_rules(keyword)
@@ -198,7 +213,7 @@ class KnowledgeService:
             task = cls._tasks.get(task_id)
             if not task or task.get("status") != "failed" or task.get("retry_count", 0) >= cls._parse_retries:
                 return None
-            task.update({"status": "queued", "progress": 0, "error": None, "message": "等待手动重试"})
+            task.update({"status": "queued", "progress": 0, "error": None, "message": "等待手动重试", "retry_count": task.get("retry_count", 0) + 1})
             args = (task_id, task["_source"], task["_output_dir"], task["_suffix"], task["_metadata"], task["_user"], task["_settings"], task["_repository"])
         cls._executor.submit(cls._run_upload_task, *args)
         return cls.task(task_id)
@@ -213,7 +228,7 @@ class KnowledgeService:
     def _run_upload_task(cls, task_id: str, source: Path, output_dir: Path, suffix: str, metadata: dict, user: dict, settings: Any, repository: KnowledgeRepository) -> None:
         try:
             cls._update_task(task_id, status="parsing", progress=10)
-            cls._update_task(task_id, retry_count=cls.task(task_id).get("retry_count", 0) + 1, message="正在解析法规文档")
+            cls._update_task(task_id, message="正在解析法规文档")
             if output_dir.exists():
                 shutil.rmtree(output_dir)
             knowledge = ingest_legal_document(source, output_dir, MinerUService(settings.mineru_api_url, timeout_seconds=settings.mineru_timeout_seconds), metadata)

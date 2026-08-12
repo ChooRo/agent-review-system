@@ -445,7 +445,7 @@ onMounted(() => { void loadDocuments() })
             <article class="kfile doc-layer-file">
               <span class="kf-ic" aria-hidden="true">§</span>
               <div class="document-main">
-                <div class="kn">{{ document.title }}</div>
+                <div class="kn">{{ document.canonical_title || document.title }}</div>
                 <div class="km">{{ document.article_count ?? '待统计' }} 条 · {{ document.unit_count ?? '待统计' }} 个检索单元 · {{ document.document_version || '版本待维护' }}</div>
                 <div class="doc-meta-row">
                   <span class="chip">{{ statusLabel(document.status) }}</span>
@@ -491,7 +491,7 @@ onMounted(() => { void loadDocuments() })
       <div v-if="uploadTask" class="upload-progress">
         <div class="progress"><i :style="{ width: `${uploadTask.progress}%` }"></i></div>
         <div class="upload-progress-meta"><span>{{ uploadTask.message || (uploadTask.status === 'retrying' ? '解析失败，正在自动重试…' : '正在处理法规文档…') }}</span><b>{{ uploadTask.progress }}%</b></div>
-        <small>已重试 {{ uploadTask.retry_count }} / {{ uploadTask.max_retries }} 次</small>
+        <small v-if="uploadTask.status === 'failed' || uploadTask.status === 'retrying'">手动重试 {{ uploadTask.retry_count }} / {{ uploadTask.max_retries }} 次</small>
       </div>
       <p v-else class="upload-pending">解析和 AI 提取可能需要一些时间，提交后进度与错误均在文档列表原地显示。</p>
       <p v-if="uploadTask?.status === 'failed'" class="upload-error">解析失败：{{ uploadTask.error || '未知错误' }}</p>
@@ -511,6 +511,7 @@ onMounted(() => { void loadDocuments() })
         <p class="candidate-summary">{{ candidateSummary }}</p>
         <div v-if="candidateTags.length" class="candidate-tags"><span v-for="[label, value] in candidateTags" :key="label" class="chip">{{ label }}：{{ value }}</span></div>
       </section>
+      <details v-if="editingDetail.metadata_extraction?.audit" class="audit-panel"><summary>查看解析调用记录</summary><div class="audit-line"><b>原文解析</b><span>{{ editingDetail.metadata_extraction.audit.parser?.tool }} → {{ editingDetail.metadata_extraction.audit.parser?.output }}</span></div><div v-for="call in editingDetail.metadata_extraction.audit.calls" :key="call.file" class="audit-call"><div><b>{{ call.status === 'success' ? '成功' : '失败' }}</b><span>{{ call.file }} · {{ call.model || '未记录模型' }}</span></div><div>Skill：{{ call.skill }}　Tool：{{ call.tool }}</div><div>输入：{{ call.input_summary }}</div><div>输出：{{ call.output_summary }}</div><div v-if="call.error" class="audit-error">错误：{{ call.error }}</div></div></details>
       <div class="upload-grid"><div class="field"><label>文件标题</label><input v-model="metadataTitle" :disabled="savingMetadata" /></div><div class="field"><label>法规正式名称</label><input v-model="metadataCanonicalTitle" :disabled="savingMetadata" /></div></div>
       <div class="upload-grid"><div class="field"><label>法律层级</label><select v-model="metadataLegalLevel" :disabled="savingMetadata"><option value="">请选择</option><option value="law">法律</option><option value="administrative_regulation">行政法规</option><option value="department_rule">部门规章</option><option value="local_regulation">地方性法规</option><option value="internal_policy">内部制度</option><option value="other">其他</option></select></div><div class="field"><label>文号 / 令号</label><input v-model="metadataDocumentNumber" :disabled="savingMetadata" /></div></div>
       <div class="upload-grid"><div class="field"><label>制定机关</label><input v-model="metadataIssuer" :disabled="savingMetadata" /></div><div class="field"><label>归口部门</label><input v-model="metadataDepartment" :disabled="savingMetadata" /></div></div>
@@ -596,6 +597,11 @@ onMounted(() => { void loadDocuments() })
 .upload-progress-meta { display:flex; justify-content:space-between; margin-top:7px; color:var(--olive); font-size:11px; }
 .upload-progress-meta b { color:var(--terra); }
 .upload-progress small { display:block; margin-top:6px; color:var(--stone); }
+.audit-panel { margin:12px 0; padding:11px 12px; border:1px solid var(--border); border-radius:9px; background:var(--ivory); color:var(--olive); font-size:10.5px; line-height:1.6; }
+.audit-panel summary { color:var(--terra); cursor:pointer; font-weight:700; }
+.audit-line, .audit-call { margin-top:8px; padding-top:8px; border-top:1px dashed var(--border); }
+.audit-line span, .audit-call span { margin-left:8px; color:var(--stone); }
+.audit-error { color:var(--crimson); word-break:break-word; }
 .upload-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
 .edit-scope { margin-top:6px; padding-top:12px; border-top:1px solid var(--border); }
 .candidate-edit-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:6px; align-items:center; }
