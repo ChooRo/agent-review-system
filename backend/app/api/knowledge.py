@@ -45,6 +45,16 @@ def get_knowledge_upload_task(task_id: str, user: CurrentUser, service: Service)
     return task
 
 
+@router.post("/documents/tasks/{task_id}/retry")
+def retry_knowledge_upload_task(task_id: str, user: CurrentUser, service: Service):
+    if not knowledge_policy.can_maintain_knowledge(user):
+        raise HTTPException(403, "only administrators can retry legal upload tasks")
+    task = service.retry_task(task_id)
+    if not task:
+        raise HTTPException(409, "legal upload task cannot be retried")
+    return task
+
+
 @router.patch("/documents/{document_key}", response_model=KnowledgeDocumentOut)
 def update_knowledge_document(document_key: str, payload: KnowledgeDocumentUpdate, user: CurrentUser, service: Service):
     return service.update(document_key, payload.model_dump(exclude_unset=True), user)

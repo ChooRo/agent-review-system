@@ -194,6 +194,9 @@ export function uploadKnowledgeDocument(payload: UploadKnowledgeDocumentPayload)
 export function getKnowledgeUploadTask(taskId: string): Promise<KnowledgeUploadTask> {
   return request(`/knowledge/documents/tasks/${encodeURIComponent(taskId)}`)
 }
+export function retryKnowledgeUploadTask(taskId: string): Promise<KnowledgeUploadTask> {
+  return request(`/knowledge/documents/tasks/${encodeURIComponent(taskId)}/retry`, { method: 'POST' })
+}
 
 export function updateKnowledgeDocument(documentKey: string, payload: UpdateKnowledgeDocumentPayload): Promise<KnowledgeListItem> {
   return request(`/knowledge/documents/${encodeURIComponent(documentKey)}`, { method: 'PATCH', body: JSON.stringify(payload) })

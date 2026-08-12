@@ -172,11 +172,12 @@ class KnowledgeService:
                 raise HTTPException(400, "file header does not match extension")
             task_id = uuid.uuid4().hex
             task = {"id": task_id, "status": "queued", "progress": 0, "retry_count": 0, "max_retries": self._parse_retries, "error": None, "document_key": None}
+            task.update({"_source": source, "_output_dir": output_dir, "_suffix": suffix, "_metadata": metadata, "_user": user, "_settings": settings, "_repository": self.repository})
             with self._tasks_lock:
                 self._tasks[task_id] = task
             # The worker owns this directory for the lifetime of the task.
             self._executor.submit(self._run_upload_task, task_id, source, output_dir, suffix, metadata, user, settings, self.repository)
-            return {"task_id": task_id, **task}
+            return {"task_id": task_id, **(self.task(task_id) or {})}
         except HTTPException:
             raise
         except Exception as exc:
@@ -189,7 +190,18 @@ class KnowledgeService:
     @classmethod
     def task(cls, task_id: str) -> dict[str, Any] | None:
         with cls._tasks_lock:
-            return dict(cls._tasks[task_id]) if task_id in cls._tasks else None
+            return {key: value for key, value in cls._tasks[task_id].items() if not key.startswith("_")} if task_id in cls._tasks else None
+
+    @classmethod
+    def retry_task(cls, task_id: str) -> dict[str, Any] | None:
+        with cls._tasks_lock:
+            task = cls._tasks.get(task_id)
+            if not task or task.get("status") != "failed" or task.get("retry_count", 0) >= cls._parse_retries:
+                return None
+            task.update({"status": "queued", "progress": 0, "error": None, "message": "等待手动重试"})
+            args = (task_id, task["_source"], task["_output_dir"], task["_suffix"], task["_metadata"], task["_user"], task["_settings"], task["_repository"])
+        cls._executor.submit(cls._run_upload_task, *args)
+        return cls.task(task_id)
 
     @classmethod
     def _update_task(cls, task_id: str, **changes: Any) -> None:
@@ -201,21 +213,10 @@ class KnowledgeService:
     def _run_upload_task(cls, task_id: str, source: Path, output_dir: Path, suffix: str, metadata: dict, user: dict, settings: Any, repository: KnowledgeRepository) -> None:
         try:
             cls._update_task(task_id, status="parsing", progress=10)
-            knowledge = None
-            last_error = None
-            for attempt in range(1, cls._parse_retries + 2):
-                cls._update_task(task_id, retry_count=attempt - 1, progress=min(15 + (attempt - 1) * 10, 40), message=f"解析中（第 {attempt} 次）")
-                try:
-                    if output_dir.exists():
-                        shutil.rmtree(output_dir)
-                    knowledge = ingest_legal_document(source, output_dir, MinerUService(settings.mineru_api_url, timeout_seconds=settings.mineru_timeout_seconds), metadata)
-                    break
-                except Exception as exc:
-                    last_error = exc
-                    if attempt <= cls._parse_retries:
-                        cls._update_task(task_id, status="retrying", error=f"{type(exc).__name__}: {exc}")
-            if knowledge is None:
-                raise last_error or RuntimeError("legal document parsing failed")
+            cls._update_task(task_id, retry_count=cls.task(task_id).get("retry_count", 0) + 1, message="正在解析法规文档")
+            if output_dir.exists():
+                shutil.rmtree(output_dir)
+            knowledge = ingest_legal_document(source, output_dir, MinerUService(settings.mineru_api_url, timeout_seconds=settings.mineru_timeout_seconds), metadata)
             cls._update_task(task_id, status="storing", progress=70)
             document_key = str(knowledge.get("legal_document", {}).get("document_key") or "")
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", document_key):
@@ -238,4 +239,5 @@ class KnowledgeService:
         except Exception as exc:
             cls._update_task(task_id, status="failed", progress=100, error=f"{type(exc).__name__}: {exc}")
         finally:
-            shutil.rmtree(source.parent, ignore_errors=True)
+            if cls.task(task_id) and cls.task(task_id).get("status") == "completed":
+                shutil.rmtree(source.parent, ignore_errors=True)
