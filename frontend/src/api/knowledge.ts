@@ -136,6 +136,18 @@ export interface UploadKnowledgeDocumentPayload {
   effective_date?: string
   expiry_date?: string
 }
+export interface KnowledgeUploadTask {
+  id: string
+  task_id?: string
+  status: 'queued' | 'parsing' | 'retrying' | 'storing' | 'completed' | 'failed'
+  progress: number
+  retry_count: number
+  max_retries: number
+  message?: string
+  error?: string | null
+  document_key?: string | null
+  result?: KnowledgeListItem
+}
 
 export interface UpdateKnowledgeDocumentPayload {
   metadata_version: number
@@ -166,7 +178,7 @@ export function getKnowledge(documentKey: string): Promise<KnowledgeDetail> {
   return request(`/knowledge/${encodeURIComponent(documentKey)}`)
 }
 
-export function uploadKnowledgeDocument(payload: UploadKnowledgeDocumentPayload): Promise<KnowledgeListItem> {
+export function uploadKnowledgeDocument(payload: UploadKnowledgeDocumentPayload): Promise<KnowledgeUploadTask> {
   const body = new FormData()
   body.append('file', payload.file)
   if (payload.title) body.append('title', payload.title)
@@ -177,6 +189,10 @@ export function uploadKnowledgeDocument(payload: UploadKnowledgeDocumentPayload)
   if (payload.effective_date) body.append('effective_date', payload.effective_date)
   if (payload.expiry_date) body.append('expiry_date', payload.expiry_date)
   return request('/knowledge/documents', { method: 'POST', body })
+}
+
+export function getKnowledgeUploadTask(taskId: string): Promise<KnowledgeUploadTask> {
+  return request(`/knowledge/documents/tasks/${encodeURIComponent(taskId)}`)
 }
 
 export function updateKnowledgeDocument(documentKey: string, payload: UpdateKnowledgeDocumentPayload): Promise<KnowledgeListItem> {

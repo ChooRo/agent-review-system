@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { apiErrorMessage } from '../../api'
 import {
   extractKnowledgeMetadata,
+  getKnowledgeUploadTask,
   getKnowledge,
   listKnowledge,
   updateKnowledgeDocument,
@@ -16,6 +17,7 @@ import type {
   LegalApplicability,
   LegalUnit,
   MetadataExtractionStatus,
+  KnowledgeUploadTask,
 } from '../../api/knowledge'
 import BaseModal from '../../components/base/BaseModal.vue'
 import RuleGovernancePanel from '../../components/business/RuleGovernancePanel.vue'
@@ -59,6 +61,8 @@ const uploadEffectiveDate = ref('')
 const uploadExpiryDate = ref('')
 const uploading = ref(false)
 const uploadError = ref('')
+const uploadTask = ref<KnowledgeUploadTask>()
+let uploadTimer: number | undefined
 const isAdmin = computed(() => canMaintainKnowledge(auth.user))
 const isSupervisor = computed(() => hasRole(auth.user, 'supervisor'))
 const editingDocument = ref<KnowledgeListItem>()
@@ -151,7 +155,7 @@ async function submitUpload() {
   uploading.value = true
   uploadError.value = ''
   try {
-    const document = await uploadKnowledgeDocument({
+    const task = await uploadKnowledgeDocument({
       file: uploadFile.value,
       title: uploadTitle.value.trim() || undefined,
       issuer: uploadIssuer.value.trim() || undefined,
@@ -161,14 +165,32 @@ async function submitUpload() {
       effective_date: uploadEffectiveDate.value || undefined,
       expiry_date: uploadExpiryDate.value || undefined,
     })
-    showUpload.value = false
-    await loadDocuments()
-    await runExtraction(document)
+    uploadTask.value = task
+    await pollUploadTask(task.id)
   } catch (reason) {
     uploadError.value = apiErrorMessage(reason)
   } finally {
     uploading.value = false
   }
+}
+
+async function pollUploadTask(taskId: string) {
+  const tick = async () => {
+    uploadTask.value = await getKnowledgeUploadTask(taskId)
+    const task = uploadTask.value
+    if (task.status === 'completed' && task.result) {
+      showUpload.value = false
+      await loadDocuments()
+      await runExtraction(task.result)
+      return
+    }
+    if (task.status === 'failed') {
+      uploadError.value = task.error || '法规文档解析失败，请稍后重试。'
+      return
+    }
+    uploadTimer = window.setTimeout(tick, 1000)
+  }
+  await tick()
 }
 
 async function runExtraction(document: KnowledgeListItem) {
@@ -451,7 +473,12 @@ onMounted(() => { void loadDocuments() })
       <div class="field"><label>标题</label><input v-model="uploadTitle" :disabled="uploading" placeholder="可留空，由解析结果补充" /></div>
       <div class="upload-grid"><div class="field"><label>发布机关</label><input v-model="uploadIssuer" :disabled="uploading" /></div><div class="field"><label>归口部门</label><input v-model="uploadDepartment" :disabled="uploading" /></div></div>
       <div class="upload-grid"><div class="field"><label>文档版本</label><input v-model="uploadDocumentVersion" :disabled="uploading" /></div><div class="field"><label>适用范围（可选人工补充）</label><input v-model="uploadApplicableScope" :disabled="uploading" /></div><div class="field"><label>生效日期</label><input v-model="uploadEffectiveDate" type="date" :disabled="uploading" /></div><div class="field"><label>失效时间</label><input v-model="uploadExpiryDate" type="date" :disabled="uploading" /></div></div>
-      <p class="upload-pending">解析和 AI 提取可能需要一些时间，提交后进度与错误均在文档列表原地显示。</p>
+      <div v-if="uploadTask" class="upload-progress">
+        <div class="progress"><i :style="{ width: `${uploadTask.progress}%` }"></i></div>
+        <div class="upload-progress-meta"><span>{{ uploadTask.message || (uploadTask.status === 'retrying' ? '解析失败，正在自动重试…' : '正在处理法规文档…') }}</span><b>{{ uploadTask.progress }}%</b></div>
+        <small>已重试 {{ uploadTask.retry_count }} / {{ uploadTask.max_retries }} 次</small>
+      </div>
+      <p v-else class="upload-pending">解析和 AI 提取可能需要一些时间，提交后进度与错误均在文档列表原地显示。</p>
       <p v-if="uploadError" class="upload-error">{{ uploadError }}</p>
       <div class="modal-foot"><button class="btn" type="button" :disabled="uploading" @click="showUpload = false">取消</button><button class="btn pri" :disabled="uploading">{{ uploading ? '正在解析入库…' : '提交并自动提取' }}</button></div>
     </form>
@@ -549,6 +576,10 @@ onMounted(() => { void loadDocuments() })
 .required, .upload-error { color:var(--crimson); }
 .upload-error { margin:0 0 12px; font-size:11px; }
 .upload-pending, .publish-hint { margin:0 0 12px; padding:9px 11px; border:1px solid var(--border); border-radius:8px; background:var(--ivory); color:var(--olive); font-size:11px; line-height:1.6; }
+.upload-progress { margin:0 0 12px; padding:11px; border:1px solid var(--border); border-radius:8px; background:var(--ivory); }
+.upload-progress-meta { display:flex; justify-content:space-between; margin-top:7px; color:var(--olive); font-size:11px; }
+.upload-progress-meta b { color:var(--terra); }
+.upload-progress small { display:block; margin-top:6px; color:var(--stone); }
 .upload-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
 .edit-scope { margin-top:6px; padding-top:12px; border-top:1px solid var(--border); }
 .candidate-edit-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:6px; align-items:center; }

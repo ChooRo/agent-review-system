@@ -4,6 +4,8 @@ import os
 import re
 import shutil
 import uuid
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +27,10 @@ from app.services.procurement_review import ALLOWED_TYPES
 
 
 class KnowledgeService:
+    _executor = ThreadPoolExecutor(max_workers=2)
+    _tasks: dict[str, dict[str, Any]] = {}
+    _tasks_lock = threading.Lock()
+    _parse_retries = 3
     def __init__(self) -> None:
         self.repository = KnowledgeRepository(Path(__file__).resolve().parents[3] / "knowledge" / "rules", Path(get_settings().data_dir))
 
@@ -164,52 +170,72 @@ class KnowledgeService:
             head = source.read_bytes()[:8]
             if (suffix == ".pdf" and not head.startswith(b"%PDF-")) or (suffix == ".docx" and not head.startswith(b"PK")) or (suffix == ".doc" and not head.startswith(b"\xd0\xcf\x11\xe0")):
                 raise HTTPException(400, "file header does not match extension")
-            try:
-                knowledge = ingest_legal_document(source, output_dir, MinerUService(settings.mineru_api_url, timeout_seconds=settings.mineru_timeout_seconds), metadata)
-            except HTTPException:
-                raise
-            except Exception as exc:
-                raise HTTPException(502, f"legal document parsing failed: {type(exc).__name__}") from exc
+            task_id = uuid.uuid4().hex
+            task = {"id": task_id, "status": "queued", "progress": 0, "retry_count": 0, "max_retries": self._parse_retries, "error": None, "document_key": None}
+            with self._tasks_lock:
+                self._tasks[task_id] = task
+            # The worker owns this directory for the lifetime of the task.
+            self._executor.submit(self._run_upload_task, task_id, source, output_dir, suffix, metadata, user, settings, self.repository)
+            return {"task_id": task_id, **task}
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(502, f"legal document upload failed: {type(exc).__name__}") from exc
+        finally:
+            # Async workers clean their own temporary directory after parsing.
+            if 'task_id' not in locals():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+
+    @classmethod
+    def task(cls, task_id: str) -> dict[str, Any] | None:
+        with cls._tasks_lock:
+            return dict(cls._tasks[task_id]) if task_id in cls._tasks else None
+
+    @classmethod
+    def _update_task(cls, task_id: str, **changes: Any) -> None:
+        with cls._tasks_lock:
+            if task_id in cls._tasks:
+                cls._tasks[task_id].update(changes)
+
+    @classmethod
+    def _run_upload_task(cls, task_id: str, source: Path, output_dir: Path, suffix: str, metadata: dict, user: dict, settings: Any, repository: KnowledgeRepository) -> None:
+        try:
+            cls._update_task(task_id, status="parsing", progress=10)
+            knowledge = None
+            last_error = None
+            for attempt in range(1, cls._parse_retries + 2):
+                cls._update_task(task_id, retry_count=attempt - 1, progress=min(15 + (attempt - 1) * 10, 40), message=f"解析中（第 {attempt} 次）")
+                try:
+                    if output_dir.exists():
+                        shutil.rmtree(output_dir)
+                    knowledge = ingest_legal_document(source, output_dir, MinerUService(settings.mineru_api_url, timeout_seconds=settings.mineru_timeout_seconds), metadata)
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if attempt <= cls._parse_retries:
+                        cls._update_task(task_id, status="retrying", error=f"{type(exc).__name__}: {exc}")
+            if knowledge is None:
+                raise last_error or RuntimeError("legal document parsing failed")
+            cls._update_task(task_id, status="storing", progress=70)
             document_key = str(knowledge.get("legal_document", {}).get("document_key") or "")
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", document_key):
-                raise HTTPException(422, "parser did not produce a safe document_key")
+                raise ValueError("parser did not produce a safe document_key")
             if not (output_dir / "document.json").is_file() or not (output_dir / "legal_knowledge.json").is_file():
-                raise HTTPException(422, "parser did not produce required knowledge artifacts")
-            now = self._now()
+                raise ValueError("parser did not produce required knowledge artifacts")
+            now = cls._now()
             document = knowledge.setdefault("legal_document", {})
-            document.update({
-                "title": metadata.get("title") or document.get("title") or document_key,
-                "issuer": metadata.get("issuer") or document.get("issuer"),
-                "department": metadata.get("department"),
-                "document_version": metadata.get("document_version") or "unknown",
-                "applicable_scope": metadata.get("applicable_scope") or "",
-                "effective_date": metadata.get("effective_date") or document.get("effective_date"),
-                "expiry_date": metadata.get("expiry_date") or document.get("expiry_date"),
-                "status": "unknown",
-                "metadata_version": 1,
-                "updated_at": now,
-                "updated_by": user["id"],
-            })
+            document.update({"title": metadata.get("title") or document.get("title") or document_key, "issuer": metadata.get("issuer") or document.get("issuer"), "department": metadata.get("department"), "document_version": metadata.get("document_version") or "unknown", "applicable_scope": metadata.get("applicable_scope") or "", "effective_date": metadata.get("effective_date") or document.get("effective_date"), "expiry_date": metadata.get("expiry_date") or document.get("expiry_date"), "status": "unknown", "metadata_version": 1, "updated_at": now, "updated_by": user["id"]})
             parsed_document = JsonStore(output_dir / "document.json").read()
             storage_key = f"{document_key}/original{suffix}"
-            document.update({"source_file": storage_key, "source_storage_key": storage_key})
-            parsed_document["source_file"] = storage_key
+            document.update({"source_file": storage_key, "source_storage_key": storage_key}); parsed_document["source_file"] = storage_key
             knowledge["metadata_extraction"] = prepare_metadata_extraction(knowledge, parsed_document)
-            JsonStore(output_dir / "document.json").write(parsed_document)
-            JsonStore(output_dir / "legal_knowledge.json").write(knowledge)
-            shutil.copy2(source, output_dir / f"original{suffix}")
-            final_dir = self.repository.root / document_key
-            if final_dir.exists():
-                raise HTTPException(409, "document_key already exists")
-            final_dir.parent.mkdir(parents=True, exist_ok=True)
+            JsonStore(output_dir / "document.json").write(parsed_document); JsonStore(output_dir / "legal_knowledge.json").write(knowledge); shutil.copy2(source, output_dir / f"original{suffix}")
+            final_dir = repository.root / document_key
+            if final_dir.exists(): raise ValueError("document_key already exists")
             archive_stage = final_dir.parent / f".{document_key}.upload-{uuid.uuid4().hex}"
-            try:
-                shutil.copytree(output_dir, archive_stage)
-                os.replace(archive_stage, final_dir)
-            except FileExistsError as exc:
-                raise HTTPException(409, "document_key already exists") from exc
-            finally:
-                shutil.rmtree(archive_stage, ignore_errors=True)
-            return self.repository.document_item(knowledge, document_key)
+            shutil.copytree(output_dir, archive_stage); os.replace(archive_stage, final_dir); shutil.rmtree(archive_stage, ignore_errors=True)
+            cls._update_task(task_id, status="completed", progress=100, document_key=document_key, result=repository.document_item(knowledge, document_key), error=None)
+        except Exception as exc:
+            cls._update_task(task_id, status="failed", progress=100, error=f"{type(exc).__name__}: {exc}")
         finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            shutil.rmtree(source.parent, ignore_errors=True)

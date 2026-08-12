@@ -2,12 +2,13 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 
 from app.api.deps import CurrentUser
 from app.schemas.knowledge import KnowledgeDocumentOut, KnowledgeDocumentUpdate
 from app.schemas.rule import RuleOut
 from app.services.knowledge import KnowledgeService
+from app.policies import knowledge as knowledge_policy
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 Service = Annotated[KnowledgeService, Depends(KnowledgeService)]
@@ -18,7 +19,7 @@ def list_knowledge(user: CurrentUser, service: Service, keyword: str | None = Qu
     return service.list_documents(keyword, status, user)
 
 
-@router.post("/documents", response_model=KnowledgeDocumentOut)
+@router.post("/documents")
 def upload_knowledge_document(
     user: CurrentUser,
     service: Service,
@@ -32,6 +33,16 @@ def upload_knowledge_document(
     expiry_date: str | None = Form(default=None),
 ):
     return service.upload(file, {"title": title, "issuer": issuer, "department": department, "document_version": document_version, "applicable_scope": applicable_scope, "effective_date": effective_date, "expiry_date": expiry_date}, user)
+
+
+@router.get("/documents/tasks/{task_id}")
+def get_knowledge_upload_task(task_id: str, user: CurrentUser, service: Service):
+    if not knowledge_policy.can_maintain_knowledge(user):
+        raise HTTPException(403, "only administrators can view legal upload tasks")
+    task = service.task(task_id)
+    if not task:
+        raise HTTPException(404, "legal upload task not found")
+    return task
 
 
 @router.patch("/documents/{document_key}", response_model=KnowledgeDocumentOut)
