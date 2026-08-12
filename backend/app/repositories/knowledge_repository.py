@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -22,10 +23,20 @@ class KnowledgeRepository:
         """Provide backward-compatible document metadata without rewriting old files."""
         doc = dict(value.get("legal_document", {}))
         extracted = value.get("metadata_extraction", {}).get("basic_information", {})
+        candidate_title = str(doc.get("canonical_title") or extracted.get("canonical_title") or "")
+        if re.match(r"^(第?[一二三四五六七八九十百千万0-9]+[条章节]|[（(][一二三四五六七八九十百千万0-9]+[）)])", candidate_title.strip()):
+            candidate_title = ""
+        if not candidate_title or candidate_title == doc.get("title"):
+            for unit in value.get("units", [])[:30]:
+                text = str(unit.get("text") or unit.get("search_text") or "")
+                match = re.search(r"根据《([^》]+)》.*制定本条例", text)
+                if match:
+                    candidate_title = f"{match.group(1)}实施条例"
+                    break
         return {
             **doc,
             "document_key": doc.get("document_key") or fallback_key,
-            "title": str(doc.get("title") or fallback_key),
+            "title": candidate_title or str(doc.get("title") or fallback_key),
             "status": doc.get("status") or "unknown",
             "document_version": doc.get("document_version") or "unknown",
             "department": doc.get("department"),
@@ -34,7 +45,7 @@ class KnowledgeRepository:
             "metadata_version": int(doc.get("metadata_version") or 1),
             "updated_at": doc.get("updated_at"),
             "updated_by": str(doc["updated_by"]) if doc.get("updated_by") is not None else None,
-            "canonical_title": doc.get("canonical_title") or extracted.get("canonical_title") or doc.get("title") or fallback_key,
+            "canonical_title": candidate_title or doc.get("title") or fallback_key,
             "legal_level": doc.get("legal_level") or "other",
             "document_number": doc.get("document_number"),
             "adoption_date": doc.get("adoption_date"),

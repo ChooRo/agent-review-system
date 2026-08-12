@@ -89,6 +89,7 @@ def infer_basic_information(document: dict[str, Any], existing: dict[str, Any]) 
         if 4 <= len(line.strip("《》 ")) <= 80
         and any(word in line for word in ("法", "条例", "规定", "办法"))
         and not line.startswith(("关于", "根据"))
+        and not re.match(r"^(第?[一二三四五六七八九十百千万0-9]+[条章节]|[（(][一二三四五六七八九十百千万0-9]+[）)])", line.strip())
     ]
     title = str(existing.get("canonical_title") or existing.get("title") or "")
     title_evidence: list[str] = []

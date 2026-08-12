@@ -155,6 +155,11 @@ class KnowledgeService:
             doc.update({"metadata_version": doc["metadata_version"] + 1, "updated_at": self._now(), "updated_by": user["id"]})
             current = value.setdefault("metadata_extraction", extraction)
             current.update({"status": "ready", "applicability": applicability, "warnings": warnings, "updated_at": self._now()})
+            basic = current.get("basic_information", {})
+            doc.update({name: field for name, field in basic.items() if field is not None})
+            if basic.get("canonical_title"):
+                doc["canonical_title"] = basic["canonical_title"]
+                doc["title"] = basic["canonical_title"]
             value["legal_document"] = doc
         self.repository.update_document(key, complete)
         return self.detail(key, user)

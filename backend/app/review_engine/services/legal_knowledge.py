@@ -96,7 +96,9 @@ def parse_docx(source: Path) -> dict[str, Any]:
 
 def build_legal_knowledge(document: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
     """把顺序Block重组为带父级上下文和证据映射的条、款、项单元。"""
-    title = str(metadata.get("title") or infer_title(document))
+    # The upload form title is a label, not authoritative legal metadata.
+    # Always derive the display/document title from the parsed legal text.
+    title = infer_title(document)
     document_key = hashlib.sha1(title.encode("utf-8")).hexdigest()[:10]
     units: list[dict[str, Any]] = []
     chapter = section = ""
@@ -157,6 +159,7 @@ def build_legal_knowledge(document: dict[str, Any], metadata: dict[str, Any]) ->
         "legal_document": {
             "document_key": document_key,
             "title": title,
+            "source_title": metadata.get("title"),
             "issuer": metadata.get("issuer"),
             "promulgation_date": metadata.get("promulgation_date"),
             "revision_date": metadata.get("revision_date"),
@@ -242,9 +245,13 @@ def check_legal_quality(units: list[dict[str, Any]], metadata: dict[str, Any]) -
 
 def infer_title(document: dict[str, Any]) -> str:
     """优先使用正文首个非目录、非层级、非日期段落作为法规名称。"""
-    for block in document.get("blocks", [])[:20]:
-        text = normalize_legal_text(block.get("text"))
-        if text and text != "目录" and not CHAPTER_RE.match(text) and not text.startswith("（"):
+    texts = [normalize_legal_text(block.get("text")) for block in document.get("blocks", [])[:30]]
+    for text in texts:
+        match = re.search(r"根据《([^》]+)》.*制定本条例", text)
+        if match:
+            return f"{match.group(1)}实施条例"
+    for text in texts:
+        if text and text != "目录" and not CHAPTER_RE.match(text) and not re.match(r"^(第?[一二三四五六七八九十百千万0-9]+[条章节]|[（(][一二三四五六七八九十百千万0-9]+[）)])", text) and any(word in text for word in ("法", "条例", "规定", "办法")):
             return text
     return str(document.get("document_id") or "未命名法规")
 
