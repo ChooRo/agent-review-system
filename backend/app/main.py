@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.auth import router as auth_router
 from app.api.procurement_reviews import router as procurement_reviews_router
 from app.api.knowledge import router as knowledge_router
+from app.api.rules import router as rules_router
 from app.core.config import get_settings
 from app.review_engine.settings import load_settings
 from pathlib import Path
@@ -11,6 +12,11 @@ from pathlib import Path
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    config_path = Path(__file__).resolve().parents[1] / "review_config.json"
+    review_config = load_settings(config_path if config_path.is_file() else None)
+    llm = review_config.get("llm", {})
+    if not (llm.get("api_url") and llm.get("api_key") and llm.get("model")):
+        raise RuntimeError("LLM configuration requires api_url, api_key, and model")
     app = FastAPI(title=settings.app_name, version="0.1.0")
     app.add_middleware(
         CORSMiddleware,
@@ -22,11 +28,12 @@ def create_app() -> FastAPI:
     app.include_router(auth_router, prefix=settings.api_prefix)
     app.include_router(procurement_reviews_router, prefix=settings.api_prefix)
     app.include_router(knowledge_router, prefix=settings.api_prefix)
+    app.include_router(rules_router, prefix=settings.api_prefix)
 
     @app.get("/health", tags=["system"])
     def health() -> dict:
         mineru_url = settings.mineru_api_url
-        return {"status": "ok", "review_execution_mode": settings.review_execution_mode, "mineru": {"configured": bool(mineru_url), "api_url": mineru_url, "note": "独立 MinerU 服务未连接时 live 审查不可用"}}
+        return {"status": "ok", "mineru": {"configured": bool(mineru_url), "api_url": mineru_url, "note": "独立 MinerU 服务未连接时审查不可用"}}
 
     return app
 

@@ -44,8 +44,8 @@ class RunStore:
         runs_root: Path,
         scenario: str,
         documents: dict[str, str],
-        mode: str,
         pause_after: str | None,
+        task_context: dict[str, Any] | None = None,
     ) -> "RunStore":
         """创建新运行目录并保存初始状态。"""
         run_id = f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:8]}"
@@ -56,7 +56,7 @@ class RunStore:
                 "run_id": run_id,
                 "scenario": scenario,
                 "documents": documents,
-                "mode": mode,
+                "task_context": task_context or {},
                 "pause_after": pause_after,
                 "status": "created",
                 "current_step": None,

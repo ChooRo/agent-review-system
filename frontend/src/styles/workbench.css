@@ -67,6 +67,12 @@
 
 .wb .evidence-label{margin-top:0;font-size:11px}
 .wb .basis-summary{margin:8px 0 12px;padding:11px 12px;border:1px solid var(--border);border-radius:10px;background:var(--ivory)}
+.wb .basis-summary-button{width:100%;font:inherit;text-align:left;cursor:pointer}
+.wb .basis-summary-button:hover{border-color:var(--terra)}
+.wb .basis-summary-button i{float:right;margin-top:-18px;color:var(--terra);font-size:16px;font-style:normal}
+.wb .basis-summary-button:focus-visible{outline:2px solid var(--terra);outline-offset:2px}
+.wb .basis-task-links{margin:-4px 0 14px;padding:0 0 12px;border-bottom:1px solid var(--border)}
+.wb .current-basis-title{margin-top:16px;padding-top:11px;border-top:1px solid var(--border)}
 .wb .basis-summary b{display:block;font-size:11.5px;color:var(--ink)}
 .wb .basis-summary span{display:block;margin-top:4px;font-size:10.5px;color:var(--stone);line-height:1.55}
 .wb .basis-group-title{display:flex;align-items:center;justify-content:space-between;margin:12px 2px 7px;font-size:10.5px;font-weight:700;color:var(--ink2)}
@@ -79,6 +85,18 @@
 .wb .basis-rule-tags .chip{margin:0}
 .wb .basis-empty{padding:10px;border:1px dashed var(--ring);border-radius:9px;text-align:center;color:var(--stone);font-size:10.5px;background:var(--ivory)}
 .wb .evidence-note{font-size:10.5px}
+.wb .applicability-detail{margin:-4px 0 14px;padding:0 0 12px;border-bottom:1px solid var(--border)}
+.wb .applicability-detail .basis-source-row{display:block}
+.wb .applicability-detail .basis-source-row>div{display:grid;gap:3px}
+.wb .applicability-detail .basis-source-row b{font-size:11px;color:var(--ink)}
+.wb .applicability-detail .basis-source-row small{color:var(--green);font-size:10px}
+.wb .applicability-detail details{margin-top:7px;color:var(--stone);font-size:10.5px}
+.wb .applicability-detail summary{cursor:pointer;color:var(--terra);font-weight:700}
+.wb .applicability-detail details p{margin:5px 0 0;line-height:1.55}
+.wb .applicability-notice{display:grid;gap:4px;margin-bottom:6px;padding:8px 10px;border:1px solid var(--border2);border-radius:9px;font-size:10.5px;line-height:1.55}
+.wb .applicability-notice b{font-size:11px}.wb .potential-law{background:var(--ochre-soft);border-color:#dfd1ad;color:var(--ochre)}
+.wb .insufficient-law{background:var(--ivory);border-style:dashed;color:var(--olive)}
+.wb .applicability-freeze{margin:9px 2px 0;color:var(--stone);font-size:10px;line-height:1.5}
 
 .review-actions{min-height:58px;padding:11px 14px;background:var(--ivory);border:1px solid var(--border2);border-radius:12px;box-shadow:none;display:flex;align-items:center;gap:10px;margin-bottom:14px}
 .review-actions .ra-t{font-size:12px;color:var(--olive)}.review-actions .ra-t b{color:var(--ink)}

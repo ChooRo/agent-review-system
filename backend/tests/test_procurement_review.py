@@ -3,6 +3,7 @@ from time import sleep
 
 from app.core.config import get_settings
 from app.main import app
+from app.services import procurement_review as review_service
 
 
 def login(client: TestClient, username: str) -> str:
@@ -20,8 +21,12 @@ def wait_for_terminal(client: TestClient, task_url: str, headers: dict) -> dict:
     raise AssertionError("审查任务未在测试时限内结束")
 
 
+def fake_completed_review(project_id, task_id, _doc_path, store_results, _fail_task, _progress_task, _engine_run_id=None, _task_context=None) -> None:
+    store_results(project_id, task_id, {"engine_run_id": "run-test", "quality": {"status": "passed"}, "task_legal_facts": {"project_type": "unknown"}, "legal_applicability": [], "legal_context_freeze": [], "findings": [{"risk_level": "medium", "title": "Test finding", "description": "Review candidate", "recommendation": "Confirm manually", "evidence": []}]})
+
+
 def test_operator_can_create_one_procurement_task_per_project(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("DATA_DIR", str(tmp_path)); monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads")); monkeypatch.setenv("REVIEW_EXECUTION_MODE", "mock"); get_settings.cache_clear()
+    monkeypatch.setenv("DATA_DIR", str(tmp_path)); monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads")); get_settings.cache_clear()
     client = TestClient(app); headers = {"Authorization": f"Bearer {login(client, 'operator')}"}
     project = client.post("/api/v1/projects", headers=headers, json={"name": "office", "project_code": "PO-2026-01", "handling_department": "procurement", "project_owner": "operator"})
     assert project.status_code == 200
@@ -31,8 +36,9 @@ def test_operator_can_create_one_procurement_task_per_project(tmp_path, monkeypa
     get_settings.cache_clear()
 
 
-def test_start_persists_mock_findings_and_events(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("DATA_DIR", str(tmp_path)); monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads")); monkeypatch.setenv("REVIEW_EXECUTION_MODE", "mock"); get_settings.cache_clear()
+def test_start_persists_review_findings_and_events(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path)); monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads")); get_settings.cache_clear()
+    monkeypatch.setattr(review_service, "run_review_workflow", fake_completed_review)
     client = TestClient(app); headers = {"Authorization": f"Bearer {login(client, 'operator')}"}
     project = client.post("/api/v1/projects", headers=headers, json={"name": "start", "project_code": "PO-START", "handling_department": "procurement", "project_owner": "operator"}).json()
     task = client.post(f"/api/v1/projects/{project['id']}/procurement-review-tasks", headers=headers, json={"title": "review"}).json()
@@ -42,7 +48,8 @@ def test_start_persists_mock_findings_and_events(tmp_path, monkeypatch) -> None:
     started = client.post(f"{task_url}/start", headers=headers)
     assert started.status_code == 200
     terminal = wait_for_terminal(client, task_url, headers)
-    assert terminal["status"] == "operator_review" and terminal["execution_mode"] == "mock"
+    assert terminal["status"] == "operator_review" and "execution_mode" not in terminal
+    assert terminal["legal_facts"] == {"project_type": "unknown"}
     findings = client.get(f"/api/v1/projects/{project['id']}/procurement-review-tasks/{task['id']}/findings", headers=headers).json()
     events = client.get(f"/api/v1/projects/{project['id']}/procurement-review-tasks/{task['id']}/events", headers=headers).json()
     assert all(finding["source"] for finding in findings) and events
@@ -51,7 +58,8 @@ def test_start_persists_mock_findings_and_events(tmp_path, monkeypatch) -> None:
 
 
 def test_procurement_review_end_to_end_recheck_flow(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("DATA_DIR", str(tmp_path)); monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads")); monkeypatch.setenv("REVIEW_EXECUTION_MODE", "mock"); get_settings.cache_clear()
+    monkeypatch.setenv("DATA_DIR", str(tmp_path)); monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads")); get_settings.cache_clear()
+    monkeypatch.setattr(review_service, "run_review_workflow", fake_completed_review)
     client = TestClient(app)
     operator = {"Authorization": f"Bearer {login(client, 'operator')}"}
     primary = {"Authorization": f"Bearer {login(client, 'supervisor')}"}

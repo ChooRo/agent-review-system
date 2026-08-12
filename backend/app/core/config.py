@@ -13,8 +13,8 @@ class Settings(BaseSettings):
     uploads_dir: str = "./data/uploads"
     max_upload_bytes: int = 50 * 1024 * 1024
     storage_backend: str = "json"
-    review_execution_mode: str = "mock"
     mineru_api_url: str = "http://127.0.0.1:8001"
+    mineru_timeout_seconds: int = 900
     jwt_secret: str = "development-only-secret-change-before-deploy"
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 120
@@ -36,12 +36,6 @@ class Settings(BaseSettings):
             raise ValueError("当前仅支持 STORAGE_BACKEND=json；PostgreSQL Repository 尚未实现")
         return value
 
-    @field_validator("review_execution_mode")
-    @classmethod
-    def execution_mode(cls, value: str) -> str:
-        if value not in {"mock", "live"}:
-            raise ValueError("REVIEW_EXECUTION_MODE 只能是 mock 或 live")
-        return value
 
 
 @lru_cache

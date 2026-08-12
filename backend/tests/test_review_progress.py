@@ -7,7 +7,7 @@ from app.services.procurement_review import ProcurementReviewService
 
 def empty_state(task: dict) -> dict:
     return {
-        "projects": [],
+        "projects": [{"id": "project-1", "name": "project", "project_code": "P-1"}],
         "tasks": [task],
         "findings": [],
         "comments": [],
@@ -19,7 +19,6 @@ def empty_state(task: dict) -> dict:
 
 def test_start_clears_error_and_stage_progress_keeps_run_id(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
-    monkeypatch.setenv("REVIEW_EXECUTION_MODE", "live")
     get_settings.cache_clear()
     service = ProcurementReviewService()
     task = {
@@ -51,16 +50,16 @@ def test_start_clears_error_and_stage_progress_keeps_run_id(tmp_path, monkeypatc
     monkeypatch.setattr("app.services.procurement_review.threading.Thread", Thread)
     service.start("project-1", "task-1", {"id": 1, "role_codes": ["operator"], "department": "business"}, None)
     started = service.repository.load()["tasks"][0]
-    assert started["execution_mode"] == "live"
     assert "error" not in started
-    assert captured["args"][-1] == "existing-run"
+    assert captured["args"][-2] == "existing-run"
+    assert captured["args"][-1]["project"]["project_code"] == "P-1"
 
-    service._update_review_progress("project-1", "task-1", "existing-run", "parse_documents", 1, 11)
+    service._update_review_progress("project-1", "task-1", "existing-run", "parse_documents", 1, 13)
     service._fail_review_task("project-1", "task-1", "later error")
     state = service.repository.load()
     progressed = state["tasks"][0]
     assert progressed["engine_run_id"] == "existing-run"
-    assert progressed["progress"] == 13
+    assert progressed["progress"] == 11
     assert progressed["error"] == "later error"
     assert state["events"][-1]["actor_id"] == 0
     assert "parse_documents" in state["events"][-1]["reason"]
@@ -97,7 +96,7 @@ def test_failed_live_workflow_resumes_existing_run(tmp_path, monkeypatch) -> Non
 
     monkeypatch.setattr(procurement_workflow, "WorkflowEngine", Engine)
     monkeypatch.setattr(procurement_workflow, "load_settings", lambda path: {"mineru": {}, "llm": {"api_url": "url", "api_key": "key", "model": "model"}, "runtime": {"runs_root": str(tmp_path)}})
-    monkeypatch.setattr(procurement_workflow, "get_settings", lambda: SimpleNamespace(mineru_api_url="http://mineru", review_execution_mode="live"))
+    monkeypatch.setattr(procurement_workflow, "get_settings", lambda: SimpleNamespace(mineru_api_url="http://mineru"))
     progress, failures = [], []
     procurement_workflow.run_review_workflow(
         "project-1",
@@ -108,5 +107,13 @@ def test_failed_live_workflow_resumes_existing_run(tmp_path, monkeypatch) -> Non
         lambda *args: progress.append(args),
         run_id,
     )
-    assert progress == [("project-1", "task-1", run_id, None, 1, 11)]
+    assert progress == [("project-1", "task-1", run_id, None, 1, 13)]
     assert failures[0][-1] == "quality_check: boom"
+
+
+def test_workflow_fails_clearly_without_llm_configuration(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(procurement_workflow, "load_settings", lambda _path: {"mineru": {}, "llm": {}, "runtime": {"runs_root": str(tmp_path)}})
+    monkeypatch.setattr(procurement_workflow, "get_settings", lambda: SimpleNamespace(mineru_api_url="http://mineru"))
+    failures = []
+    procurement_workflow.run_review_workflow("project-1", "task-1", "document.pdf", lambda *_args: None, lambda *args: failures.append(args), lambda *_args: None)
+    assert "LLM configuration requires api_url, api_key, and model" in failures[0][-1]

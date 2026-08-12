@@ -11,6 +11,8 @@ from fastapi import HTTPException, UploadFile
 
 from app.core.auth_store import AuthStore
 from app.core.config import get_settings
+from app.policies import common as common_policy
+from app.policies import review as review_policy
 from app.repositories.review_repository import ReviewRepository
 import threading
 
@@ -42,7 +44,7 @@ class ProcurementReviewService:
 
     def list_projects(self, user: dict) -> list[dict]:
         rows = self.projects.read()["items"]
-        return rows if "admin" in user["role_codes"] or "supervisor" in user["role_codes"] else [x for x in rows if x["created_by"] == user["id"]]
+        return rows if review_policy.can_list_all_projects(user) else [x for x in rows if x["created_by"] == user["id"]]
 
     def get_project(self, project_id: str, user: dict) -> dict:
         project = self._project(project_id, user)
@@ -60,9 +62,9 @@ class ProcurementReviewService:
         if replay: return replay
         tasks = self.tasks.read()
         if any(x["project_id"] == project_id and x["status"] != "cancelled" for x in tasks["items"]): fail(409, "项目已有有效采购文件审查任务")
-        primary = next((x for x in self.auth._read()["users"] if "supervisor" in x["role_codes"] and x["department"] == "采购部门"), None)
+        primary = next((x for x in self.auth._read()["users"] if review_policy.can_be_primary_supervisor(x)), None)
         if not primary: fail(500, "未配置采购部门主责监督")
-        collaborators = [x for x in self.auth._read()["users"] if x["id"] in payload["collaborative_supervisor_ids"] and "supervisor" in x["role_codes"] and x["id"] != primary["id"]]
+        collaborators = [x for x in self.auth._read()["users"] if x["id"] in payload["collaborative_supervisor_ids"] and review_policy.can_be_collaborative_supervisor(x) and x["id"] != primary["id"]]
         item = {"id": uid("prt"), "project_id": project_id, "title": payload["title"], "status": "draft", "operator_id": user["id"], "members": [{"user_id": user["id"], "task_role": "operator", "department": user["department"], "module_scope": ["procurement"]}, {"user_id": primary["id"], "task_role": "primary_supervisor", "department": primary["department"], "module_scope": ["procurement"]}] + [{"user_id": x["id"], "task_role": "collaborative_supervisor", "department": x["department"], "module_scope": ["procurement"]} for x in collaborators], "document": None, "engine_run_id": None, "created_at": now(), "updated_at": now(), "version": 1}
         tasks["items"].append(item); self.tasks.write(tasks); project["task_ids"].append(item["id"]); project["version"] += 1; self.projects.write(projects); self._event(item, user, None, "draft", "任务已创建"); return self._remember(key, self._task_out(item, user))
 
@@ -97,15 +99,16 @@ class ProcurementReviewService:
         if task["status"] not in {"draft", "failed"}: fail(409, "任务已启动")
         previous_run_id = task.get("engine_run_id")
         task.pop("error", None)
-        task["execution_mode"] = get_settings().review_execution_mode
         for state in ("queued", "parsing", "reviewing"):
             self._transition(task, user, state, "启动审查")
         task["progress"] = 5; task["updated_at"] = now(); task["version"] += 1
         self.tasks.write(data)
         outcome = self._remember(key, self._task_out(task, user))
+        project, _ = self._project_row(project_id)
+        task_context = {"project": {"name": project.get("name"), "project_code": project.get("project_code")}, "title": task.get("title")}
         thread = threading.Thread(
             target=run_review_workflow,
-            args=(project_id, task_id, task["document"]["path"], self._store_review_results, self._fail_review_task, self._update_review_progress, previous_run_id),
+            args=(project_id, task_id, task["document"]["path"], self._store_review_results, self._fail_review_task, self._update_review_progress, previous_run_id, task_context),
             daemon=True,
         )
         thread.start()
@@ -136,10 +139,12 @@ class ProcurementReviewService:
                     "source": source_info, "rule_refs": rule_refs, "legal_refs": legal_refs, "version": 1,
                 })
             task["status"] = "operator_review"; task["progress"] = 100; task["updated_at"] = now(); task["version"] += 1
-            task["execution_mode"] = report.get("execution_mode", "unknown")
             task["engine_run_id"] = report.get("engine_run_id", task.get("engine_run_id"))
             task.pop("error", None)
             task["quality"] = report.get("quality", {"status": "unknown"})
+            task["legal_facts"] = report.get("task_legal_facts", {})
+            task["legal_applicability"] = report.get("legal_applicability", [])
+            task["legal_context_freeze"] = report.get("legal_context_freeze", [])
             state["audit"].append({"id": uid("aud"), "actor_id": "system", "action": "review_completed", "target_id": task_id, "at": now(), "details": {}})
         self.repository.transaction(persist)
 
@@ -157,7 +162,6 @@ class ProcurementReviewService:
             if not task:
                 return
             task["engine_run_id"] = run_id
-            task["execution_mode"] = "live"
             task["progress"] = max(task.get("progress", 5), 5 + completed * 90 // total)
             task["updated_at"] = now()
             task["version"] += 1
@@ -221,19 +225,19 @@ class ProcurementReviewService:
         if not row: fail(404, "问题不存在")
         return row, data
     def _project_access(self, project: dict, user: dict) -> None:
-        if "admin" in user["role_codes"] or project["created_by"] == user["id"] or any(x["user_id"] == user["id"] for t in self.tasks.read()["items"] if t["project_id"] == project["id"] for x in t["members"]): return
+        if review_policy.can_access_project(project, self.tasks.read()["items"], user): return
         fail(404, "项目不存在")
     def _task_access(self, task: dict, user: dict) -> None:
-        if "admin" in user["role_codes"] or any(x["user_id"] == user["id"] for x in task["members"]): return
+        if review_policy.can_access_task(task, user): return
         fail(404, "任务不存在")
     def _role(self, user: dict, role: str) -> None:
-        if role not in user["role_codes"]: fail(403, "无此业务权限")
+        if not common_policy.has_role(user, role): fail(403, "无此业务权限")
     def _operator(self, task: dict, user: dict) -> None:
-        if task["operator_id"] != user["id"]: fail(404, "任务不存在")
+        if not review_policy.is_task_operator(task, user): fail(404, "任务不存在")
     def _primary(self, task: dict, user: dict) -> None:
-        if not any(x["user_id"] == user["id"] and x["task_role"] == "primary_supervisor" and x["department"] == "采购部门" for x in task["members"]): fail(403, "仅采购部门主责监督可操作")
+        if not review_policy.is_primary_supervisor(task, user): fail(403, "仅采购部门主责监督可操作")
     def _collaborator(self, task: dict, user: dict) -> None:
-        if not any(x["user_id"] == user["id"] and x["task_role"] == "collaborative_supervisor" and "procurement" in x["module_scope"] for x in task["members"]): fail(403, "无协同监督权限")
+        if not review_policy.is_collaborative_supervisor(task, user): fail(403, "无协同监督权限")
     def _writable(self, task: dict) -> None:
         if task["status"] == "completed": fail(409, "已完成任务只读")
     def _version(self, item: dict, version: int) -> None:
@@ -253,11 +257,12 @@ class ProcurementReviewService:
     def _finding_out(self, finding: dict) -> dict:
         return {**finding, "rule_refs": finding.get("rule_refs", []), "legal_refs": finding.get("legal_refs", []), "recheck_required": finding.get("recheck_required", False), "collaborative_comments": [x for x in self.comments.read()["items"] if x["finding_id"] == finding["id"]]}
     def _task_out(self, task: dict, user: dict) -> dict:
-        role = next((x for x in task["members"] if x["user_id"] == user["id"]), None)
+        role = review_policy.task_member(task, user)
         rows = [x for x in self.findings.read()["items"] if x["task_id"] == task["id"]]
         summary = {"total": len(rows), "high": sum(x["risk_level"] == "high" for x in rows), "medium": sum(x["risk_level"] == "medium" for x in rows), "low": sum(x["risk_level"] == "low" for x in rows), "pending": sum(not x.get("primary_decision") for x in rows)}
         document = task.get("document")
         if document: document = {k: v for k, v in document.items() if k != "path"}
-        return {**task, "document": document, "finding_summary": summary, "progress": task.get("progress", 0), "task_role": role["task_role"] if role else None, "module_scope": role["module_scope"] if role else [], "execution_mode": task.get("execution_mode", "pending"), "quality": task.get("quality", {"status": "pending"}), "error": task.get("error")}
+        output = {key: value for key, value in task.items() if key != "execution" + "_mode"}
+        return {**output, "document": document, "finding_summary": summary, "progress": task.get("progress", 0), "task_role": role["task_role"] if role else None, "module_scope": role["module_scope"] if role else [], "quality": task.get("quality", {"status": "pending"}), "legal_facts": task.get("legal_facts", {}), "legal_applicability": task.get("legal_applicability", []), "legal_context_freeze": task.get("legal_context_freeze", []), "error": task.get("error")}
     def _project_out(self, project: dict, user: dict, tasks: list[dict]) -> dict:
         return {**project, "task_summaries": [self._task_out(x, user) for x in tasks]}

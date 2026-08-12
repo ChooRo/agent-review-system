@@ -7,6 +7,7 @@ import {
   saveDisposition, savePrimaryDecision, submitTask, updateCollaborativeComment,
 } from '../../api/procurement-review'
 import { useAuthStore } from '../../stores/auth'
+import { workbenchMode } from '../../policies/permissions'
 import type { Finding, ReviewTask, RiskLevel } from '../../types/procurement-review'
 import { evidenceText } from '../../utils/evidence-text'
 
@@ -19,12 +20,11 @@ const selected = ref('')
 const activeClause = ref('')
 const notice = ref('')
 const busy = ref(false)
+const basisExpanded = ref(false)
+const applicabilityExpanded = ref(false)
 
 const isReadonly = computed(() => task.value?.status === 'completed')
-const mode = computed<'operator' | 'primary_supervisor' | 'collaborative_supervisor' | 'readonly'>(() => {
-  if (isReadonly.value || auth.user?.roles[0]?.code === 'admin') return 'readonly'
-  return task.value?.task_role ?? 'readonly'
-})
+const mode = computed(() => workbenchMode(auth.user, task.value))
 const visible = computed(() => findings.value.filter((item) => filter.value === 'all' || item.risk_level === filter.value))
 const rechecks = computed(() => findings.value.filter((item) => item.recheck_required && !item.primary_decision))
 const selectedFinding = computed(() => findings.value.find((item) => item.id === selected.value) ?? visible.value[0] ?? findings.value[0])
@@ -48,13 +48,30 @@ const legalSources = computed(() => {
   })
   return [...sources.values()].map((source) => ({ ...source, articles: [...source.articles] }))
 })
+const legalApplicability = computed(() => task.value?.legal_applicability)
+const applicableLaws = computed(() => (legalApplicability.value ?? []).filter((item) => item.status === 'applicable'))
+const potentialLaws = computed(() => (legalApplicability.value ?? []).filter((item) => item.status === 'potential'))
+const insufficientFactsLaws = computed(() => (legalApplicability.value ?? []).filter((item) => item.status === 'insufficient_facts'))
+const frozenApplicableLaws = computed(() => {
+  const freezes = task.value?.legal_context_freeze?.length
+    ? task.value.legal_context_freeze
+    : applicableLaws.value.map((item) => item.source_freeze)
+  return [...new Map(freezes.map((freeze) => [freeze.document_key, freeze])).values()]
+})
+function freezeLabel(documentKey: string) {
+  const freeze = frozenApplicableLaws.value.find((item) => item.document_key === documentKey)
+  return freeze ? `元数据版本 ${freeze.metadata_version} · 内容已冻结` : '未返回冻结版本信息'
+}
+function freezeDetail(documentKey: string) {
+  const freeze = frozenApplicableLaws.value.find((item) => item.document_key === documentKey)
+  return freeze ? `冻结版本：元数据 v${freeze.metadata_version}；内容指纹 ${freeze.content_fingerprint || '未返回'}` : '后端未返回冻结版本信息。'
+}
 const allRules = computed(() => {
   const rules = new Map<string, { id: string; title: string }>()
   findings.value.flatMap((finding) => finding.rule_refs ?? []).forEach((rule) => rules.set(rule.id, rule))
   return [...rules.values()]
 })
 const currentRules = computed(() => selectedFinding.value?.rule_refs ?? [])
-const otherRules = computed(() => allRules.value.filter((rule) => !currentRules.value.some((current) => current.id === rule.id)))
 const currentLegalSources = computed(() => {
   const sources = new Map<string, Set<string>>()
   ;(selectedFinding.value?.legal_refs ?? []).forEach((ref) => {
@@ -78,7 +95,7 @@ function message(error: unknown) {
   const status = (error as { status?: number }).status
   return status === 409 ? '数据已被其他人修改，请刷新后重新确认。' : status === 403 ? '无权执行该操作。' : status === 422 ? '填写内容不符合要求。' : '操作失败，请稍后重试。'
 }
-async function disposition(item: Finding, action: 'accept' | 'partial_accept' | 'reject' | 'edit', comment: string) {
+async function disposition(item: Finding, action: 'accept' | 'partial_accept' | 'reject', comment: string) {
   if (!task.value) return
   busy.value = true
   try { await saveDisposition(task.value.project_id, task.value.id, item.id, action, comment, item.version); notice.value = '经办处置已保存。'; await load() }
@@ -169,27 +186,60 @@ onMounted(load)
         <div class="wcol">
           <div class="whead"><span>证据链 / 审查依据</span></div>
           <div class="wbody">
-            <div class="sec-label evidence-label">三层审查依据</div>
-            <div class="basis-summary">
-              <b>系统关联 {{ legalSources.length }} 份法规文档、{{ allRules.length }} 条已发布执行规则</b>
-              <span>依据本任务真实审查结果汇总；法规文档与执行规则分别展示</span>
+            <div class="sec-label evidence-label">审查前关口</div>
+            <button class="basis-summary basis-summary-button applicability-summary" type="button" :aria-expanded="applicabilityExpanded" @click="applicabilityExpanded = !applicabilityExpanded">
+              <b>本次适用法规</b>
+              <span v-if="legalApplicability">正式适用 {{ applicableLaws.length }} 份 · 待确认 {{ potentialLaws.length }} 份 · 事实不足 {{ insufficientFactsLaws.length }} 份</span>
+              <span v-else>任务尚未返回适用法规匹配结果</span><i aria-hidden="true">{{ applicabilityExpanded ? '⌃' : '⌄' }}</i>
+            </button>
+            <div v-if="applicabilityExpanded" class="applicability-detail">
+              <template v-if="legalApplicability">
+                <div class="basis-group-title">正式审查依据 <span>{{ applicableLaws.length }} 份</span></div>
+                <template v-if="applicableLaws.length">
+                  <div v-for="item in applicableLaws" :key="item.document_key" class="basis-source-row applicable-law">
+                    <div><b>{{ item.document_key }}</b><small>正式适用 · {{ freezeLabel(item.document_key) }}</small></div>
+                    <details><summary>匹配说明与冻结版本</summary><p v-if="item.reasons.length">{{ item.reasons.join('；') }}</p><p v-else>后端未返回匹配理由。</p><p v-if="item.evidence.task_facts.length">任务事实：{{ item.evidence.task_facts.join('；') }}</p><p>{{ freezeDetail(item.document_key) }}</p></details>
+                  </div>
+                </template>
+                <div v-else class="basis-empty">本次未匹配到正式适用法规。</div>
+
+                <div v-if="potentialLaws.length" class="basis-group-title">可能适用 / 待确认 <span>{{ potentialLaws.length }} 份</span></div>
+                <div v-for="item in potentialLaws" :key="item.document_key" class="applicability-notice potential-law"><b>{{ item.document_key }} · 待确认，不作为当前结论依据</b><details><summary>查看匹配理由</summary><p>{{ item.reasons.length ? item.reasons.join('；') : '后端未返回待确认理由。' }}</p></details></div>
+
+                <div v-if="insufficientFactsLaws.length" class="basis-group-title">事实不足 <span>{{ insufficientFactsLaws.length }} 份</span></div>
+                <div v-for="item in insufficientFactsLaws" :key="item.document_key" class="applicability-notice insufficient-law"><b>{{ item.document_key }} · 事实不足，不作为当前结论依据</b><details><summary>查看缺失事实</summary><p>{{ item.missing_facts.length ? item.missing_facts.join('；') : '后端未返回缺失事实。' }}</p></details></div>
+
+                <p v-if="frozenApplicableLaws.length" class="applicability-freeze">正式依据已冻结 {{ frozenApplicableLaws.length }} 份；展开对应“匹配说明”可查看版本信息。</p>
+              </template>
+              <div v-else class="basis-empty">后端尚未返回本任务的适用法规匹配数据。</div>
             </div>
 
-            <div class="basis-group-title">制度依据 <span>{{ currentLegalSources.length }} 份 · 当前结论</span></div>
+            <div class="sec-label evidence-label">三层审查依据</div>
+            <button class="basis-summary basis-summary-button" type="button" :aria-expanded="basisExpanded" @click="basisExpanded = !basisExpanded">
+              <b>系统关联 {{ legalSources.length }} 份法规文档、{{ allRules.length }} 条已发布执行规则</b>
+              <span>依据本任务真实审查结果汇总；点击{{ basisExpanded ? '收起' : '展开' }}明细</span><i aria-hidden="true">{{ basisExpanded ? '⌃' : '⌄' }}</i>
+            </button>
+            <div v-if="basisExpanded" class="basis-task-links">
+              <div class="basis-group-title">任务关联法规文档 <span>{{ legalSources.length }} 份</span></div>
+              <template v-if="legalSources.length"><div v-for="source in legalSources" :key="source.title" class="basis-source-row"><span>{{ source.title }}</span><small>{{ source.articles.length ? source.articles.join('、') : '涉及条款未标注' }}</small></div></template>
+              <div v-else class="basis-empty">本任务未关联法规文档</div>
+              <div class="basis-group-title">任务关联已发布执行规则 <span>{{ allRules.length }} 条</span></div>
+              <template v-if="allRules.length"><div v-for="rule in allRules" :key="rule.id" class="rule current-rule"><span class="rid">{{ rule.id }}</span><div class="rt">{{ rule.title }}</div></div></template>
+              <div v-else class="basis-empty">本任务未使用已发布执行规则</div>
+            </div>
+
+            <div class="basis-group-title current-basis-title">当前结论关联 <span>{{ selectedFinding ? selectedFinding.title : '未选中审查项' }}</span></div>
+            <div class="basis-group-title">法规依据 <span>{{ currentLegalSources.length }} 份</span></div>
             <template v-if="currentLegalSources.length">
               <div v-for="source in currentLegalSources" :key="source.title" class="basis-source-row"><span>{{ source.title }}</span><small>{{ source.articles.length ? source.articles.join('、') : '法规文档' }}</small></div>
             </template>
             <div v-else class="basis-empty">当前结论未关联法规文档依据</div>
 
-            <div class="basis-group-title">当前结论命中规则 <span>{{ currentRules.length }} 条</span></div>
+            <div class="basis-group-title">已发布执行规则 <span>{{ currentRules.length }} 条</span></div>
             <template v-if="currentRules.length">
               <div v-for="rule in currentRules" :key="rule.id" class="rule current-rule"><span class="rid">{{ rule.id }}</span><div class="rt">{{ rule.title }}</div></div>
             </template>
             <div v-else class="basis-empty">当前结论未命中已发布执行规则</div>
-
-            <div class="basis-group-title">任务其他匹配规则 <span>{{ otherRules.length }} 条</span></div>
-            <div v-if="otherRules.length" class="basis-rule-tags"><span v-for="rule in otherRules" :key="rule.id" class="chip" :title="rule.title">{{ rule.id }}</span></div>
-            <div v-else class="basis-empty">本任务暂无其他匹配规则</div>
 
             <div class="note evidence-note"><b>文档层</b>展示解析法规文档形成的引用；<b>规则层</b>仅展示已发布且真实命中的执行规则；未形成真实经验案例关联时不展示案例数量。</div>
           </div>

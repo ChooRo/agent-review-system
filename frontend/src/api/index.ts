@@ -1,4 +1,8 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000/api/v1'
+export function normalizeApiBaseUrl(value: string): string {
+  return value.replace(/\/+$/, '') || '/api/v1'
+}
+
+const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL || '/api/v1')
 
 export function apiErrorMessage(error: unknown): string {
   const status = (error as { status?: number })?.status
@@ -12,14 +16,20 @@ export function apiErrorMessage(error: unknown): string {
 
 export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = localStorage.getItem('access_token')
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers: {
-      ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...options.headers,
-    },
-  })
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
+      headers: {
+        ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...options.headers,
+      },
+    })
+  } catch (reason) {
+    if (reason instanceof TypeError) throw new Error('无法连接服务，请确认前后端开发服务仍在运行。')
+    throw reason
+  }
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: '服务暂时不可用' }))
     const detail = Array.isArray(error.detail)

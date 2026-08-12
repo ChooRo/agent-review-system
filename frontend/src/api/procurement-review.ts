@@ -69,7 +69,7 @@ export async function getFindings(projectId: string, taskId: string): Promise<Fi
 
 export function saveDisposition(
   projectId: string, taskId: string, findingId: string,
-  action: 'accept' | 'partial_accept' | 'reject' | 'edit', comment: string, version: number,
+  action: 'accept' | 'partial_accept' | 'reject', comment: string, version: number,
 ): Promise<Finding> {
   return request(`${taskPath(projectId, taskId)}/findings/${findingId}/operator-disposition`, {
     method: 'PUT',

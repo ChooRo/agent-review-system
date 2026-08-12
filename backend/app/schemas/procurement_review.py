@@ -89,8 +89,10 @@ class TaskOut(BaseModel):
     progress: int = Field(ge=0, le=100)
     task_role: str | None = None
     module_scope: list[str] = []
-    execution_mode: str = "pending"
-    quality: dict = {}
+    quality: dict = Field(default_factory=dict)
+    legal_facts: dict = Field(default_factory=dict)
+    legal_applicability: list[dict] = Field(default_factory=list)
+    legal_context_freeze: list[dict] = Field(default_factory=list)
     engine_run_id: str | None = None
     error: str | None = None
     version: int

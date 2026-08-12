@@ -16,6 +16,8 @@ from .llm import LLMService
 from .mineru import MinerUService
 from .runtime import RunStore, read_json, write_json
 from app.review_engine.tools import ToolContext, build_registry
+from app.core.config import get_settings
+from app.repositories.rule_repository import RuleRepository
 
 
 STEPS = [
@@ -26,13 +28,19 @@ STEPS = [
     "build_ledger",
     "build_scene_view",
     "global_validation",
+    "derive_legal_facts",
     "match_rules",
+    "match_legal_applicability",
     "agent_review",
     "validate_evidence",
     "final_report",
 ]
 REQUIRED_ROLES = {"procurement": {"procurement"}}
 ID_PREFIX = {"procurement": "REQ"}
+LEGAL_FACT_FIELDS = (
+    "project_type", "procurement_method", "is_government_procurement",
+    "is_engineering_related", "is_mandatory_tender", "region", "review_stage",
+)
 
 
 class WorkflowEngine:
@@ -61,12 +69,12 @@ class WorkflowEngine:
         self,
         scenario: str,
         documents: dict[str, str],
-        mode: str = "mock",
         pause_after: str | None = None,
+        task_context: dict[str, Any] | None = None,
     ) -> RunStore:
         """校验输入、创建运行并执行到完成或指定断点。"""
-        validate_request(scenario, documents, mode, pause_after)
-        store = RunStore.create(self.runs_root, scenario, documents, mode, pause_after)
+        validate_request(scenario, documents, pause_after)
+        store = RunStore.create(self.runs_root, scenario, documents, pause_after, task_context)
         return self.run(store)
 
     def resume(self, run_dir: Path, pause_after: str | None = None) -> RunStore:
@@ -86,7 +94,7 @@ class WorkflowEngine:
     def run(self, store: RunStore) -> RunStore:
         """按固定顺序执行未完成步骤，失败时保留现场。"""
         state = store.load_state()
-        llm = LLMService(self.config.get("llm", {}), state["mode"], store)
+        llm = LLMService(self.config.get("llm", {}), store)
         mineru_config = self.config.get("mineru", {})
         mineru = MinerUService(
             mineru_config.get("api_url", "http://127.0.0.1:8000"),
@@ -255,23 +263,6 @@ class WorkflowEngine:
             )
             partials = []
             for batch_no, blocks in enumerate(review_batches, start=1):
-                mock_profile = {
-                    "skill": "understand-document-structure",
-                    "skill_version": "1.0.0",
-                    "document_id": document.get("document_id"),
-                    "document_version_id": document.get("document_version_id") or document.get("version_id"),
-                    "document_role": role,
-                    "quality_status": quality.get(role, {}).get("status"),
-                    "outline": [],
-                    "section_responsibilities": [],
-                    "parties": [],
-                    "terms": [],
-                    "references": [],
-                    "global_constraints": [],
-                    "inventories": {"tables": [], "images": [], "attachments": []},
-                    "warnings": [],
-                    "unresolved": [],
-                }
                 partials.append(
                     llm.json_call(
                         "structure_profile",
@@ -284,7 +275,6 @@ class WorkflowEngine:
                             "batch_no": batch_no,
                             "blocks": block_payload(blocks),
                         },
-                        mock_profile,
                     )
                 )
             profiles[role] = merge_structure_profiles(base, partials, quality.get(role, {}))
@@ -316,22 +306,11 @@ class WorkflowEngine:
             ) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]], bool]:
                 batch_no, blocks = entry
                 valid_ids = {b["block_id"] for b in blocks}
-                mock_items = heuristic_candidates(role, blocks, skill["categories"])
                 prompt = skill["instruction"]
                 result_key = "items"
-                mock_result: dict[str, Any] = {"items": mock_items}
                 if role == "procurement":
                     prompt = self.formal_skills["procurement"]
                     result_key = "candidate_items"
-                    mock_result = {
-                        "skill": "understand-procurement-document",
-                        "skill_version": "1.0.0",
-                        "candidate_items": mock_items,
-                        "coverage": [],
-                        "rejected_items": [],
-                        "unresolved_references": [],
-                        "warnings": [],
-                    }
                 prompt += ("" if role == "procurement" else " 返回严格JSON：{\"items\":[{\"category\":\"\",\"statement\":\"\",\"subject\":\"\",\"action\":\"\",\"condition\":\"\",\"value\":\"\",\"mandatory\":false,\"evidence_block_ids\":[\"B-...\"],\"evidence_quote\":\"原文摘录\"}]}。")
                 payload = {
                     "document_role": role,
@@ -353,7 +332,7 @@ class WorkflowEngine:
                     if cached.get("input_fingerprint") == fingerprint:
                         return batch_no, cached.get("accepted", []), cached.get("rejected", []), True
 
-                result = llm.json_call("extract_candidates", prompt, payload, mock_result)
+                result = llm.json_call("extract_candidates", prompt, payload)
                 accepted, rejected = validate_candidate_items(result.get(result_key, []), valid_ids, blocks)
                 for item in accepted:
                     item["source_batch"] = batch_no
@@ -442,11 +421,11 @@ class WorkflowEngine:
         quality = self._previous(store, "quality_check")["quality"]
         global_validation = self._previous(store, "global_validation")
         rules = self._previous(store, "match_rules")
+        legal_gate = self._previous(store, "match_legal_applicability")
         skill = self.skills["review_agents"][scenario]
         instruction = skill["instruction"]
         if scenario == "procurement":
             instruction = self.formal_skills["procurement_review"]
-        mock = mock_review(scenario, view, quality, global_validation)
         result = llm.json_call(
             "agent_review",
             instruction
@@ -455,10 +434,19 @@ class WorkflowEngine:
                 "scenario": scenario,
                 "quality": quality,
                 "global_validation": global_validation,
-                "matched_rules": rules,
+                "matched_rules": {
+                    "rules": rules["rules"],
+                    "matched_count": rules["matched_count"],
+                    "rule_source": rules["rule_source"],
+                    "warnings": rules["warnings"],
+                },
+                "legal_context": {
+                    "applicable_legal_units": legal_gate["applicable_legal_units"],
+                    "decisions": legal_gate["decisions"],
+                    "warning": "Only applicable_legal_units may support a legal-risk finding; potential sources require human confirmation.",
+                },
                 "scene_view": limit_view(view),
             },
-            mock,
         )
         return {
             "agent": skill["name"],
@@ -525,32 +513,22 @@ class WorkflowEngine:
     ) -> dict[str, Any]:
         """筛选可执行规则，并从法规知识目录召回相关条款单元。"""
         config = self.config.get("rules", {})
-        rules_path = config.get("path")
-        rules: list[dict[str, Any]] = []
-        rule_source = None
-        if rules_path:
-            path = Path(str(rules_path)).expanduser().resolve()
-            if not path.is_file():
-                raise FileNotFoundError(f"规则文件不存在：{path}")
-            value = read_json(path)
-            rules = value.get("rules", value) if isinstance(value, dict) else value
-            if not isinstance(rules, list):
-                raise ValueError("规则文件必须是数组或含rules数组的对象")
-            rule_source = str(path)
+        rules = RuleRepository(Path(get_settings().data_dir)).applicable_rules(state["scenario"])
+        rule_source = "JsonRuleRepository"
         view_text = json.dumps(self._previous(store, "build_scene_view"), ensure_ascii=False)
         matched = []
         for rule in rules:
-            if not isinstance(rule, dict) or rule.get("status", "effective") != "effective":
+            if not isinstance(rule, dict) or rule.get("status") != "published":
                 continue
-            applies = rule.get("applies_to", [])
-            if applies and state["scenario"] not in applies:
+            if rule.get("module") != state["scenario"]:
                 continue
-            keywords = [str(word) for word in rule.get("keywords", [])]
+            keywords = [str(word) for word in rule.get("tags", [])]
             if not keywords or any(word in view_text for word in keywords):
                 matched.append(rule)
 
-        legal_units: list[dict[str, Any]] = []
+        legal_documents: list[dict[str, Any]] = []
         legal_sources: list[dict[str, Any]] = []
+        legal_source_stats = {"included": 0, "excluded_unknown": 0, "excluded_repealed": 0, "excluded_unconfirmed_profile": 0, "excluded_other": 0}
         knowledge_root = config.get("knowledge_root")
         if knowledge_root and state["scenario"] == "procurement":
             root = Path(str(knowledge_root)).expanduser().resolve()
@@ -558,32 +536,101 @@ class WorkflowEngine:
                 knowledge = read_json(knowledge_path)
                 document = knowledge.get("legal_document", {})
                 quality = knowledge.get("quality", {})
-                legal_sources.append({
-                    "path": str(knowledge_path),
+                status = document.get("status") or "unknown"
+                extraction = knowledge.get("metadata_extraction", {})
+                profile = document.get("applicability") or {}
+                profile_confirmed = extraction.get("status") == "confirmed" and isinstance(profile, dict)
+                document_key = str(document.get("document_key") or knowledge_path.parent.name)
+                fallbacks = []
+                if not document.get("metadata_version"):
+                    fallbacks.append("metadata_version defaulted to 1 because the source document has no version")
+                source_identifier = str(document.get("source_storage_key") or document.get("source_file") or document_key)
+                if not document.get("source_storage_key") and not document.get("source_file"):
+                    fallbacks.append("source fingerprint uses document_key because no source identifier is stored")
+                freeze = {
+                    "document_key": document_key,
+                    "metadata_version": int(document.get("metadata_version") or 1),
+                    "source_fingerprint": "sha256:" + hashlib.sha256(source_identifier.encode("utf-8")).hexdigest(),
+                    "content_fingerprint": "sha256:" + hashlib.sha256(knowledge_path.read_bytes()).hexdigest(),
+                    "fallbacks": fallbacks,
+                }
+                included = status == "effective" and profile_confirmed
+                source = {
+                    "document_key": document_key,
                     "title": document.get("title"),
-                    "status": document.get("status"),
+                    "status": status,
                     "effective_date": document.get("effective_date"),
                     "quality_status": quality.get("status"),
-                })
-                legal_units.extend(knowledge.get("units", []))
-        procurement_items = self._previous(store, "build_ledger")["ledgers"].get("procurement", [])
-        ranked_units = rank_legal_units(legal_units, procurement_items, top_k=30)
+                    "profile_status": extraction.get("status"),
+                    "included": included,
+                    "source_freeze": freeze,
+                }
+                legal_sources.append(source)
+                if included:
+                    legal_source_stats["included"] += 1
+                    legal_documents.append({"source": source, "applicability": profile, "units": knowledge.get("units", [])})
+                elif status == "unknown":
+                    legal_source_stats["excluded_unknown"] += 1
+                elif status == "repealed":
+                    legal_source_stats["excluded_repealed"] += 1
+                elif status == "effective":
+                    legal_source_stats["excluded_unconfirmed_profile"] += 1
+                else:
+                    legal_source_stats["excluded_other"] += 1
         warnings = []
-        if not rules_path:
+        if not rules:
             warnings.append("未配置可执行规则库")
-        if not ranked_units:
+        if not legal_documents:
             warnings.append("未召回法规条款")
-        if any(source.get("quality_status") != "reviewable" for source in legal_sources):
+        if any(source.get("quality_status") != "reviewable" for source in legal_sources if source["included"]):
             warnings.append("部分法规效力元数据未确认，只能作为候选依据")
+        excluded_count = sum(count for name, count in legal_source_stats.items() if name != "included")
+        if excluded_count:
+            warnings.append(f"已排除 {excluded_count} 份未生效或已失效法规文档")
         for warning in warnings:
             store.event("WARNING", "match_rules", "rule_warning", warning)
         return {
             "rules": matched,
             "matched_count": len(matched),
             "rule_source": rule_source,
-            "legal_units": ranked_units,
-            "legal_unit_count": len(ranked_units),
             "legal_sources": legal_sources,
+            "legal_source_stats": legal_source_stats,
+            "legal_documents": legal_documents,
+            "warnings": warnings,
+        }
+
+    def _derive_legal_facts(
+        self, store: RunStore, state: dict[str, Any], llm: LLMService, mineru: MinerUService
+    ) -> dict[str, Any]:
+        parsed = self._previous(store, "parse_documents")
+        ledger = self._previous(store, "build_ledger")["ledgers"].get("procurement", [])
+        facts = derive_task_legal_facts(parsed.get("documents", {}), ledger, state.get("task_context", {}))
+        unknown = [name for name in LEGAL_FACT_FIELDS if facts.get(name) == "unknown"]
+        if unknown:
+            store.event("WARNING", "derive_legal_facts", "facts_incomplete", "legal applicability will not infer unknown facts", missing_facts=unknown)
+        return {"task_legal_facts": facts, "missing_facts": unknown}
+
+    def _match_legal_applicability(
+        self, store: RunStore, state: dict[str, Any], llm: LLMService, mineru: MinerUService
+    ) -> dict[str, Any]:
+        facts = self._previous(store, "derive_legal_facts")["task_legal_facts"]
+        matched = self._previous(store, "match_rules")
+        decisions = match_legal_documents(facts, matched.get("legal_documents", []))
+        applicable = [item for item in decisions if item["status"] == "applicable"]
+        procurement_items = self._previous(store, "build_ledger")["ledgers"].get("procurement", [])
+        units = [unit for item in applicable for unit in item.pop("_units")]
+        ranked_units = rank_legal_units(units, procurement_items, top_k=30)
+        for item in decisions:
+            item.pop("_units", None)
+        warnings = list(matched.get("warnings", []))
+        if not applicable:
+            warnings.append("no legal document entered the formal legal context; legal conclusions require human confirmation")
+            store.event("WARNING", "match_legal_applicability", "legal_context_empty", warnings[-1])
+        return {
+            "task_legal_facts": facts,
+            "decisions": decisions,
+            "applicable_legal_units": ranked_units,
+            "frozen_context": [item["source_freeze"] for item in applicable],
             "warnings": warnings,
         }
 
@@ -593,7 +640,7 @@ class WorkflowEngine:
         """过滤不存在的Block证据，无证据问题降级为待人工确认。"""
         parsed = self._previous(store, "parse_documents")
         review = self._previous(store, "agent_review")
-        matched_rules = self._previous(store, "match_rules")
+        legal_gate = self._previous(store, "match_legal_applicability")
         block_index = {
             b["block_id"]: {
                 "document_role": role,
@@ -608,7 +655,7 @@ class WorkflowEngine:
         context = ToolContext(run_id=state["run_id"], agent="workflow")
         legal_index = {
             unit["legal_unit_id"]: unit
-            for unit in matched_rules.get("legal_units", [])
+            for unit in legal_gate.get("applicable_legal_units", [])
             if unit.get("legal_unit_id")
         }
         findings = []
@@ -662,11 +709,10 @@ class WorkflowEngine:
         evidence = self._previous(store, "validate_evidence")
         ledger = self._previous(store, "build_ledger")
         view = self._previous(store, "build_scene_view")
-        rules = self._previous(store, "match_rules")
+        legal_gate = self._previous(store, "match_legal_applicability")
         return {
             "run_id": state["run_id"],
             "scenario": state["scenario"],
-            "mode": state["mode"],
             "overall_conclusion": evidence["overall_conclusion"],
             "finding_count": len(evidence["findings"]),
             "verified_finding_count": evidence["verified_count"],
@@ -674,16 +720,20 @@ class WorkflowEngine:
             "ledger_stats": ledger["stats"],
             "scene_view": view,
             "legal_basis_summary": {
-                "candidate_legal_unit_count": rules.get("legal_unit_count", 0),
-                "sources": rules.get("legal_sources", []),
-                "warnings": rules.get("warnings", []),
+                "task_legal_facts": legal_gate["task_legal_facts"],
+                "decisions": legal_gate["decisions"],
+                "frozen_context": legal_gate["frozen_context"],
+                "warnings": legal_gate["warnings"],
             },
+            "task_legal_facts": legal_gate["task_legal_facts"],
+            "legal_applicability": legal_gate["decisions"],
+            "legal_context_freeze": legal_gate["frozen_context"],
             "findings": evidence["findings"],
             "human_review_required": True,
         }
 
 
-def validate_request(scenario: str, documents: dict[str, str], mode: str, pause_after: str | None) -> None:
+def validate_request(scenario: str, documents: dict[str, str], pause_after: str | None) -> None:
     """校验场景、文件角色、运行模式和断点名称。"""
     if scenario not in REQUIRED_ROLES:
         raise ValueError(f"未知场景：{scenario}")
@@ -695,8 +745,6 @@ def validate_request(scenario: str, documents: dict[str, str], mode: str, pause_
             raise ValueError(f"未知文档角色：{role}")
         if not Path(path).expanduser().is_file():
             raise FileNotFoundError(f"输入文件不存在：{path}")
-    if mode not in {"mock", "live"}:
-        raise ValueError("mode必须是mock或live")
     if pause_after is not None and pause_after not in STEPS:
         raise ValueError(f"未知断点：{pause_after}")
 
@@ -926,8 +974,8 @@ def section_batches(blocks: list[dict[str, Any]], max_chars: int) -> list[list[d
     return batches or [[]]
 
 
-def heuristic_candidates(role: str, blocks: list[dict[str, Any]], categories: list[str]) -> list[dict[str, Any]]:
-    """mock模式使用的可解释候选提取，验证流程而不冒充正式AI效果。"""
+def derive_candidate_hints(role: str, blocks: list[dict[str, Any]], categories: list[str]) -> list[dict[str, Any]]:
+    """Derive candidate hints from locally parsed blocks."""
     keywords = {
         "procurement": "应|须|不得|资格|评分|报价|限价|验收|付款|合同|期限|时间",
         "response": "响应|承诺|满足|提供|偏离|报价|资质|业绩|人员|参数",
@@ -938,7 +986,7 @@ def heuristic_candidates(role: str, blocks: list[dict[str, Any]], categories: li
         text = str(block.get("text") or "").strip()
         if not text or not re.search(keywords, text):
             continue
-        category = classify_category(role, text, categories)
+        category = classify_candidate_category(role, text, categories)
         items.append(
             {
                 "category": category,
@@ -955,8 +1003,8 @@ def heuristic_candidates(role: str, blocks: list[dict[str, Any]], categories: li
     return items
 
 
-def classify_category(role: str, text: str, categories: list[str]) -> str:
-    """mock模式按关键词给候选打标签；live模式由文档理解Skill判断。"""
+def classify_candidate_category(role: str, text: str, categories: list[str]) -> str:
+    """Classify a locally derived candidate hint by keyword."""
     maps = {
         "procurement": [
             ("资格|资质|业绩", "资格与实质性条件"),
@@ -1037,6 +1085,129 @@ def similarity(left: str, right: str) -> float:
     return len(a & b) / len(a | b)
 
 
+def derive_task_legal_facts(
+    documents: dict[str, dict[str, Any]], ledger: list[dict[str, Any]], task_context: dict[str, Any]
+) -> dict[str, Any]:
+    """Derive only explicit procurement facts; absence always remains unknown."""
+    sources = []
+    for role, document in documents.items():
+        for block in document.get("blocks", []):
+            text = str(block.get("text") or "")
+            if text:
+                sources.append({"source": "document", "role": role, "block_id": block.get("block_id"), "quote": text})
+    for item in ledger:
+        text = str(item.get("statement") or item.get("evidence_quote") or "")
+        if text:
+            sources.append({"source": "ledger", "item_id": item.get("item_id"), "quote": text})
+    project = task_context.get("project", {}) if isinstance(task_context, dict) else {}
+    for field in ("name", "project_code", "title"):
+        if project.get(field):
+            sources.append({"source": "project", "field": field, "quote": str(project[field])})
+    if isinstance(task_context, dict) and task_context.get("title"):
+        sources.append({"source": "task", "field": "title", "quote": str(task_context["title"])})
+
+    def evidence_for(*terms: str) -> list[dict[str, Any]]:
+        return [source for source in sources if any(term in source["quote"] for term in terms)][:5]
+
+    def choice(mapping: list[tuple[str, tuple[str, ...]]]) -> tuple[str, list[dict[str, Any]]]:
+        matched = [(value, evidence_for(*terms)) for value, terms in mapping if evidence_for(*terms)]
+        values = {value for value, _ in matched}
+        return (matched[0] if len(values) == 1 else ("unknown", [])) if matched else ("unknown", [])
+
+    project_type, project_type_evidence = choice([
+        ("engineering", ("建设工程", "工程项目", "工程采购")),
+        ("goods", ("货物采购", "设备采购", "物资采购")),
+        ("services", ("服务采购", "咨询服务", "技术服务")),
+    ])
+    procurement_method, procurement_method_evidence = choice([
+        ("open_tender", ("公开招标",)), ("invited_tender", ("邀请招标",)),
+        ("competitive_negotiation", ("竞争性谈判",)), ("inquiry", ("询价",)),
+        ("single_source", ("单一来源",)),
+    ])
+
+    def boolean_fact(yes: tuple[str, ...], no: tuple[str, ...]) -> tuple[str, list[dict[str, Any]]]:
+        no_evidence, yes_evidence = evidence_for(*no), evidence_for(*yes)
+        if no_evidence and not yes_evidence:
+            return "no", no_evidence
+        if yes_evidence and not no_evidence:
+            return "yes", yes_evidence
+        return "unknown", []
+
+    government, government_evidence = boolean_fact(("政府采购",), ("非政府采购", "不属于政府采购"))
+    engineering, engineering_evidence = boolean_fact(("建设工程", "工程项目", "工程采购"), ("非工程", "不属于工程"))
+    mandatory, mandatory_evidence = boolean_fact(("依法必须招标", "必须招标项目"), ("非依法必须招标", "不属于依法必须招标"))
+    regions = [(match.group(0), source) for source in sources for match in re.finditer(r"[\u4e00-\u9fff]{2,8}(?:省|自治区|市)", source["quote"])]
+    region_values = {value for value, _ in regions}
+    region, region_evidence = (next(iter(region_values)), [source for value, source in regions if value == next(iter(region_values))][:3]) if len(region_values) == 1 else ("unknown", [])
+    facts = {
+        "project_type": project_type,
+        "procurement_method": procurement_method,
+        "is_government_procurement": government,
+        "is_engineering_related": engineering,
+        "is_mandatory_tender": mandatory,
+        "region": region,
+        "review_stage": "procurement_document_review",
+        "evidence": {
+            "project_type": project_type_evidence, "procurement_method": procurement_method_evidence,
+            "is_government_procurement": government_evidence, "is_engineering_related": engineering_evidence,
+            "is_mandatory_tender": mandatory_evidence, "region": region_evidence, "review_stage": [],
+        },
+    }
+    return facts
+
+
+def match_legal_documents(facts: dict[str, Any], documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Use only explicit profile predicates; ambiguous profiles stay potential."""
+    decisions = []
+    for document in documents:
+        profile = document.get("applicability", {})
+        conditions = profile_conditions(profile)
+        reasons, missing, outcomes = [], [], []
+        for field, expected, profile_item in conditions:
+            actual = facts.get(field, "unknown")
+            outcome = "insufficient" if actual == "unknown" else "match" if actual == expected else "mismatch"
+            if outcome == "insufficient":
+                missing.append(field)
+            outcomes.append(outcome)
+            reasons.append({"field": field, "expected": expected, "actual": actual, "outcome": outcome, "profile_value": profile_item.get("value")})
+        if any(value == "mismatch" for value in outcomes):
+            status = "not_applicable"
+        elif any(value == "insufficient" for value in outcomes):
+            status = "insufficient_facts"
+        elif conditions:
+            status = "applicable"
+        else:
+            status = "potential"
+            missing.append("applicability_semantics")
+            reasons.append({"field": "applicability", "expected": "explicit project predicate", "actual": "not_available", "outcome": "potential"})
+        source = document["source"]
+        decisions.append({
+            "document_key": source["document_key"], "title": source.get("title"), "status": status,
+            "reasons": reasons,
+            "evidence": {"task_facts": {field: facts.get("evidence", {}).get(field, []) for field, _, _ in conditions}, "profile": [item for _, _, item in conditions]},
+            "missing_facts": sorted(set(missing)), "source_freeze": source["source_freeze"], "_units": document.get("units", []),
+        })
+    return decisions
+
+
+def profile_conditions(profile: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
+    conditions = []
+    for field in ("project_types", "activities", "trigger_conditions", "business_phases"):
+        for item in profile.get(field, []) if isinstance(profile.get(field), list) else []:
+            value = str(item.get("value") or "")
+            if "政府采购" in value:
+                conditions.append(("is_government_procurement", "yes", item))
+            elif "依法必须招标" in value or "必须招标项目" in value:
+                conditions.append(("is_mandatory_tender", "yes", item))
+            elif "工程" in value:
+                conditions.append(("is_engineering_related", "yes", item))
+            elif "采购文件" in value:
+                conditions.append(("review_stage", "procurement_document_review", item))
+            elif "公开招标" in value:
+                conditions.append(("procurement_method", "open_tender", item))
+    return conditions
+
+
 def rank_legal_units(
     units: list[dict[str, Any]], procurement_items: list[dict[str, Any]], top_k: int
 ) -> list[dict[str, Any]]:
@@ -1078,59 +1249,6 @@ def build_alignment_matrix(
             }
         )
     return matrix
-
-
-def mock_review(
-    scenario: str,
-    view: dict[str, Any],
-    quality: dict[str, Any],
-    global_validation: dict[str, Any],
-) -> dict[str, Any]:
-    """生成流程验收用结果，并明确标记mock不能替代正式审查。"""
-    findings: list[dict[str, Any]] = []
-    for role, report in quality.items():
-        for issue in report.get("issues", []):
-            findings.append(
-                {
-                    "finding_type": "parse_quality",
-                    "risk_level": "medium",
-                    "description": f"{role}：{issue['message']}",
-                    "ledger_item_ids": [],
-                    "evidence_block_ids": [],
-                    "recommendation": "人工确认解析质量或重新解析",
-                    "needs_human_confirmation": True,
-                }
-            )
-    for issue in global_validation.get("issues", []):
-        findings.append(
-            {
-                "finding_type": issue.get("code", "global_validation"),
-                "risk_level": "pending",
-                "description": issue.get("message", "全文检查异常"),
-                "ledger_item_ids": [],
-                "evidence_block_ids": issue.get("evidence_block_ids", []),
-                "recommendation": "回看原文并人工确认",
-                "needs_human_confirmation": True,
-            }
-        )
-    if scenario != "procurement":
-        matrices = [value for key, value in view.items() if key.endswith("matrix")]
-        for row in [row for matrix in matrices for row in matrix if row.get("status") == "evidence_insufficient"][:50]:
-            findings.append(
-                {
-                    "finding_type": "evidence_insufficient",
-                    "risk_level": "pending",
-                    "description": "未找到足够的对应证据，需扩大检索或人工确认",
-                    "ledger_item_ids": [row.get("baseline_item_id")],
-                    "evidence_block_ids": row.get("baseline_evidence_block_ids", []),
-                    "recommendation": "检查条款号、关键词、表格和附件",
-                    "needs_human_confirmation": True,
-                }
-            )
-    return {
-        "overall_conclusion": "mock模式已跑通流程，所有业务结论均需live模型和人工复核",
-        "findings": findings,
-    }
 
 
 def limit_view(view: dict[str, Any], max_items: int = 120) -> dict[str, Any]:

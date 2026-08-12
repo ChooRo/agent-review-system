@@ -105,7 +105,7 @@ function logout() {
         <div class="logo" v-html="iconSvg('leaf', 17)"></div>
         <div>
           <span class="bt">厦门烟草采购管理智能辅助平台</span>
-          <small>AI 一期 · 最新方案交互演示</small>
+          <small>AI 一期 · 采购文件智能审查</small>
         </div>
       </div>
       <div class="hright">

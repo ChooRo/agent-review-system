@@ -1,0 +1,4 @@
+interface:
+  display_name: "法规适用条件提取"
+  short_description: "从候选法规条文提取带原文证据的适用条件、例外与优先关系"
+  default_prompt: "Use $extract-legal-applicability-profile to extract an evidence-bound legal applicability profile from candidate legal units."

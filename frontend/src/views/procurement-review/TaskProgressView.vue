@@ -13,6 +13,26 @@ const retrying = ref(false)
 let timer: number | undefined
 let lastEventId: string | undefined
 
+function progressValue() {
+  const value = Number(task.value?.progress)
+  return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0
+}
+function taskPhase() {
+  if (!task.value) return '等待处理'
+  if (task.value.status === 'queued') return '等待解析'
+  if (task.value.status === 'parsing') return '文档解析与质量检查'
+  if (task.value.status === 'reviewing') return 'AI 审查与适用法规匹配'
+  if (task.value.status === 'completed') return '审查已完成'
+  return '适用法规匹配完成，正在人工复核'
+}
+function phaseState(index: number) {
+  const status = task.value?.status
+  if (status === 'queued') return ''
+  if (status === 'parsing') return index === 0 ? 'current' : ''
+  if (status === 'reviewing') return index < 2 ? 'done' : index === 2 ? 'current' : ''
+  return index < 4 ? 'done' : 'current'
+}
+
 async function load() {
   try {
     const projectId = String(route.params.projectId)
@@ -96,22 +116,23 @@ onUnmounted(() => clearInterval(timer))
         <p>{{ task.document?.file_name }}</p>
 
         <div class="progress" style="margin:25px 0 8px">
-          <i :style="{ width: `${task.progress ?? 0}%` }"></i>
+          <i :style="{ width: `${progressValue()}%` }"></i>
         </div>
         <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--stone)">
-          <span>{{ (task.progress ?? 0) < 35 ? '文件安全校验与登记' : (task.progress ?? 0) < 65 ? '文档解析与质量检查' : (task.progress ?? 0) < 88 ? 'AI 审查与证据校验' : '等待人工确认' }}</span>
-          <b style="color:var(--terra)">{{ task.progress ?? 0 }}%</b>
+          <span>{{ taskPhase() }}</span>
+          <b style="color:var(--terra)">{{ progressValue() }}%</b>
         </div>
 
         <ol class="timeline">
-          <li :class="{ done: (task.progress ?? 0) >= 20 }">文件安全校验与登记</li>
-          <li :class="{ done: (task.progress ?? 0) >= 45 }">文档解析与质量检查</li>
-          <li :class="{ done: (task.progress ?? 0) >= 80 }">AI 审查与证据校验</li>
-          <li :class="{ done: (task.progress ?? 0) >= 100 }">等待人工确认</li>
+          <li :class="phaseState(0)">文件安全校验与登记</li>
+          <li :class="phaseState(1)">文档解析与质量检查</li>
+          <li :class="phaseState(2)">适用法规匹配</li>
+          <li :class="phaseState(3)">AI 审查与证据校验</li>
+          <li :class="phaseState(4)">等待人工确认</li>
         </ol>
 
         <button
-          v-if="(task.progress ?? 0) >= 100 || task.status === 'operator_review'"
+          v-if="progressValue() >= 100 || task.status === 'operator_review'"
           class="btn pri"
           @click="router.push({ name: 'procurement-workbench', params: { projectId: task.project_id, taskId: task.id } })"
         >

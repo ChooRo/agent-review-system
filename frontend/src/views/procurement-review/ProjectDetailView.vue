@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import BaseModal from '../../components/base/BaseModal.vue'
 import { apiErrorMessage } from '../../api'
-import { createTask, getProject, listTasks } from '../../api/procurement-review'
+import { createTask, getProject, listTasks, retryTask } from '../../api/procurement-review'
 import type { Project, ReviewTask } from '../../types/procurement-review'
 
 const route = useRoute()
@@ -20,6 +20,10 @@ const uploadError = ref('')
 const pending = ref(false)
 const projectId = computed(() => String(route.params.projectId))
 const error = ref('')
+const retryingTaskIds = ref(new Set<string>())
+const taskErrors = ref<Record<string, string>>({})
+let progressTimer: number | undefined
+let refreshInFlight = false
 
 function startCreate() { createStep.value = 1; draftMode.value = 'single'; title.value = ''; file.value = undefined; uploadError.value = ''; showCreate.value = true }
 function selectType(mode: 'single' | 'dual' | 'triple') { if (mode !== 'single') return; draftMode.value = mode; createStep.value = 2 }
@@ -32,13 +36,48 @@ const statusLabel: Record<string, string> = {
   failed: '处理失败', cancelled: '已取消', queued: '排队中',
 }
 
+const activeStatuses = new Set<ReviewTask['status']>(['queued', 'parsing', 'reviewing'])
+function isActiveTask(task: ReviewTask) { return activeStatuses.has(task.status) }
+function taskProgress(task: ReviewTask) {
+  const value = Number(task.progress)
+  return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0
+}
+function progressStage(task: ReviewTask) {
+  if (task.status === 'queued') return '等待解析'
+  if (task.status === 'parsing') return '文档解析'
+  if (task.status === 'reviewing') return 'AI 审查与适用法规匹配'
+  return ''
+}
+function stopProgressPolling() {
+  if (progressTimer !== undefined) window.clearInterval(progressTimer)
+  progressTimer = undefined
+}
+function syncProgressPolling() {
+  if (!tasks.value.some(isActiveTask)) {
+    stopProgressPolling()
+  } else if (progressTimer === undefined) {
+    progressTimer = window.setInterval(() => { void refreshTasks() }, 2000)
+  }
+}
+
 async function load() {
+  stopProgressPolling()
   loading.value = true; error.value = ''
   try {
     project.value = await getProject(projectId.value)
     tasks.value = await listTasks(projectId.value)
   } catch (reason) { error.value = apiErrorMessage(reason) }
-  finally { loading.value = false }
+  finally { loading.value = false; syncProgressPolling() }
+}
+
+async function refreshTasks() {
+  if (refreshInFlight) return
+  refreshInFlight = true
+  try {
+    tasks.value = await listTasks(projectId.value)
+    error.value = ''
+  } catch (reason) { error.value = apiErrorMessage(reason) }
+  finally { refreshInFlight = false; syncProgressPolling() }
 }
 
 function onFile(event: Event) {
@@ -57,27 +96,46 @@ async function submit() {
   pending.value = true
   try {
     const task = await createTask(projectId.value, title.value || `${project.value?.name}采购文件审核`, file.value)
-    router.push({ name: 'procurement-progress', params: { projectId: projectId.value, taskId: task.id } })
+    showCreate.value = false
+    await refreshTasks()
   } catch (reason) { uploadError.value = apiErrorMessage(reason) }
   finally { pending.value = false }
 }
 
-function taskAction(task: ReviewTask) {
-  if (task.status === 'parsing' || task.status === 'reviewing' || task.status === 'failed') {
-    router.push({ name: 'procurement-progress', params: { projectId: projectId.value, taskId: task.id } })
-  } else {
-    router.push({ name: 'procurement-workbench', params: { projectId: projectId.value, taskId: task.id } })
+function isRetrying(taskId: string) { return retryingTaskIds.value.has(taskId) }
+
+async function retryFailedTask(task: ReviewTask) {
+  if (isRetrying(task.id)) return
+  retryingTaskIds.value = new Set(retryingTaskIds.value).add(task.id)
+  const nextErrors = { ...taskErrors.value }
+  delete nextErrors[task.id]
+  taskErrors.value = nextErrors
+  try {
+    await retryTask(projectId.value, task.id)
+    await refreshTasks()
+  } catch (reason) {
+    taskErrors.value = { ...taskErrors.value, [task.id]: apiErrorMessage(reason) }
+  } finally {
+    const nextRetrying = new Set(retryingTaskIds.value)
+    nextRetrying.delete(task.id)
+    retryingTaskIds.value = nextRetrying
   }
+}
+
+function taskAction(task: ReviewTask) {
+  router.push({ name: 'procurement-workbench', params: { projectId: projectId.value, taskId: task.id } })
 }
 
 function statusClass(status: string) {
   if (status === 'completed' || status === 'cancelled') return 'done'
   if (status === 'failed') return 'done'
-  if (status === 'parsing' || status === 'reviewing') return 'doing'
+  if (status === 'queued' || status === 'parsing' || status === 'reviewing') return 'doing'
   return 'todo'
 }
 
-onMounted(load)
+onMounted(() => { void load() })
+watch(() => route.params.projectId, () => { void load() })
+onUnmounted(stopProgressPolling)
 </script>
 
 <template>
@@ -136,29 +194,30 @@ onMounted(load)
             </div>
             <div class="subtask-status-cell">
               <span class="pill" :class="statusClass(task.status)">{{ statusLabel[task.status] ?? task.status }}</span>
-              <div v-if="task.status === 'reviewing' || task.status === 'parsing'" class="subtask-progress">
-                <i :style="{ width: `${task.progress ?? 0}%` }"></i>
+              <div v-if="isActiveTask(task)" class="subtask-progress">
+                <i :style="{ width: `${taskProgress(task)}%` }"></i>
               </div>
-              <div v-if="task.status === 'reviewing' || task.status === 'parsing'" class="subtask-progress-meta">
-                <span>正在审查</span><b>{{ task.progress ?? 0 }}%</b>
+              <div v-if="isActiveTask(task)" class="subtask-progress-meta">
+                <span>{{ progressStage(task) }}</span><b>{{ taskProgress(task) }}%</b>
               </div>
             </div>
             <div class="subtask-result">
               <template v-if="task.status === 'failed'"><strong>{{ task.error?.slice(0, 40) || '处理失败' }}</strong></template>
               <template v-else-if="task.status === 'completed'">审查完成</template>
               <template v-else>—</template>
+              <small v-if="taskErrors[task.id]" class="subtask-retry-error">{{ taskErrors[task.id] }}</small>
             </div>
             <div class="subtask-result">{{ task.updated_at?.slice(0, 10) ?? task.created_at?.slice(0, 10) ?? '—' }}</div>
             <div class="task-row-actions">
               <button
                 class="btn"
-                :class="{ pri: task.status !== 'completed' && task.status !== 'parsing' && task.status !== 'reviewing' }"
-                :disabled="task.status === 'parsing' || task.status === 'reviewing'"
-                @click="taskAction(task)"
+                :class="{ pri: task.status !== 'completed' && !isActiveTask(task) }"
+                :disabled="isActiveTask(task) || isRetrying(task.id)"
+                @click="task.status === 'failed' ? retryFailedTask(task) : taskAction(task)"
               >
-                <template v-if="task.status === 'parsing' || task.status === 'reviewing'">处理中</template>
+                <template v-if="isActiveTask(task)">解析中</template>
                 <template v-else-if="task.status === 'completed'">查看</template>
-                <template v-else-if="task.status === 'failed'">重试</template>
+                <template v-else-if="task.status === 'failed'">{{ isRetrying(task.id) ? '正在重试…' : '重新处理' }}</template>
                 <template v-else>进入</template>
               </button>
             </div>

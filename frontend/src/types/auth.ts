@@ -8,6 +8,7 @@ export interface User {
   username: string
   display_name: string
   department: string
+  module_scope?: string[]
   roles: Role[]
 }
 

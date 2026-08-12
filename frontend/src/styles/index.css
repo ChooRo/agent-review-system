@@ -224,6 +224,7 @@ table.tbl {
 .subtask-name b { display: block; font-size: 13px; color: var(--ink); }
 .subtask-result { display: block; margin-top: 4px; font-size: 10.5px; color: var(--stone); line-height: 1.55; }
 .subtask-result strong { color: var(--olive); }
+.subtask-retry-error { display: block; margin-top: 3px; color: var(--crimson); font-size: 10px; line-height: 1.4; }
 .subtask-progress { height: 5px; margin-top: 8px; background: var(--sand); border-radius: 999px; overflow: hidden; }
 .subtask-progress i { display: block; height: 100%; background: var(--terra); border-radius: inherit; transition: width .35s ease; }
 .subtask-progress-meta { display: flex; justify-content: space-between; margin-top: 5px; font-size: 9px; color: var(--stone); }
@@ -642,12 +643,13 @@ table.tbl {
 .progress-card { max-width: 720px; }
 .progress-card h2 { color: var(--ink); margin: 14px 0 5px; }
 .progress-card p { margin: 0; color: var(--stone); font-size: 12px; }
-.timeline { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: 24px 0; padding: 0; list-style: none; }
+.timeline { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin: 24px 0; padding: 0; list-style: none; }
 .timeline li {
   padding: 10px 12px; border: 1px solid var(--border2);
   border-radius: 9px; font-size: 11px; color: var(--stone);
 }
 .timeline li.done { border-color: var(--terra); background: var(--terra-soft); color: var(--terra); font-weight: 600; }
+.timeline li.current { border-color: var(--ochre); background: var(--ochre-soft); color: var(--ochre); font-weight: 600; }
 
 /* ===== Task Row Actions ===== */
 .task-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; white-space: nowrap; }
