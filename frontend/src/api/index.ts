@@ -5,6 +5,7 @@ export function normalizeApiBaseUrl(value: string): string {
 const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL || '/api/v1')
 
 export function apiErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message
   const status = (error as { status?: number })?.status
   if (status === 403) return '无权访问或执行该操作。'
   if (status === 404) return '资源不存在或您无权获知其存在。'

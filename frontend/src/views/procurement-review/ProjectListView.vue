@@ -3,7 +3,8 @@ import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import BaseModal from '../../components/base/BaseModal.vue'
 import { apiErrorMessage } from '../../api'
-import { createProject, listProjects } from '../../api/procurement-review'
+import { createProject, listAssignableUsers, listProjects } from '../../api/procurement-review'
+import type { AssignableUser } from '../../api/procurement-review'
 import type { Project } from '../../types/procurement-review'
 
 const router = useRouter()
@@ -11,8 +12,10 @@ const projects = ref<Project[]>([])
 const loading = ref(true)
 const showCreate = ref(false)
 const error = ref('')
+const createError = ref('')
 const pending = ref(false)
-const form = ref({ name: '', project_code: '', handling_department: '采购业务部', project_owner: '' })
+const users = ref<AssignableUser[]>([])
+const form = ref({ name: '', project_code: '', handling_department: '采购业务部', project_owner: '' as number | '' })
 
 async function load() {
   loading.value = true; error.value = ''
@@ -22,16 +25,28 @@ async function load() {
 }
 
 async function submit() {
+  createError.value = ''
+  if (form.value.project_owner === '') {
+    createError.value = '请选择项目负责人'
+    error.value = '请选择项目负责人'
+    return
+  }
+  const projectOwner = form.value.project_owner
+  const payload = { ...form.value, project_owner: projectOwner }
   pending.value = true
   try {
-    const project = await createProject(form.value)
+    const project = await createProject(payload)
     showCreate.value = false
     router.push({ name: 'procurement-project', params: { projectId: project.id } })
-  } catch (reason) { error.value = apiErrorMessage(reason) }
+  } catch (reason) { createError.value = apiErrorMessage(reason) }
   finally { pending.value = false }
 }
 
-onMounted(load)
+onMounted(async () => { await Promise.all([load(), loadUsers()]) })
+
+async function loadUsers() {
+  try { users.value = await listAssignableUsers() } catch (reason) { error.value = apiErrorMessage(reason) }
+}
 </script>
 
 <template>
@@ -101,7 +116,8 @@ onMounted(load)
       <div class="field full"><label>项目名称</label><input v-model.trim="form.name" required /></div>
       <div class="field"><label>项目编号</label><input v-model.trim="form.project_code" required /></div>
       <div class="field"><label>经办部门</label><input v-model.trim="form.handling_department" required /></div>
-      <div class="field"><label>项目负责人</label><input v-model.trim="form.project_owner" required /></div>
+      <div class="field"><label>项目负责人</label><select v-model="form.project_owner" required><option value="" disabled>请选择负责人</option><option v-for="person in users" :key="person.id" :value="person.id">{{ person.display_name }}（{{ person.department }}）</option></select></div>
+      <p v-if="createError" class="create-error" role="alert"><span aria-hidden="true">!</span>{{ createError }}</p>
       <div class="modal-foot">
         <button type="button" class="btn" @click="showCreate = false">取消</button>
         <button class="btn pri" :disabled="pending">{{ pending ? '创建中…' : '创建项目' }}</button>
@@ -109,3 +125,34 @@ onMounted(load)
     </form>
   </BaseModal>
 </template>
+
+<style scoped>
+.create-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  align-self: end;
+  min-height: 18px;
+  margin: 0 0 1px;
+  padding: 8px 10px;
+  border: 1px solid #f0c9c2;
+  border-radius: 8px;
+  background: #fff6f4;
+  color: #b84836;
+  font-size: 11px;
+  line-height: 1.4;
+}
+.modal-foot { grid-column: 1 / -1; }
+.create-error span {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  border-radius: 50%;
+  background: #c95f49;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+}
+</style>

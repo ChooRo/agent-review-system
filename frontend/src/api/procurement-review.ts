@@ -1,6 +1,12 @@
 import { idempotencyKey, request } from './index'
 import type { CreateProjectPayload, Finding, Project, ReviewTask } from '../types/procurement-review'
 
+export interface AssignableUser { id: number; username: string; display_name: string; department: string }
+
+export function listAssignableUsers(): Promise<AssignableUser[]> {
+  return request('/auth/users')
+}
+
 const taskPath = (projectId: string, taskId = '') =>
   `/projects/${projectId}/procurement-review-tasks${taskId ? `/${taskId}` : ''}`
 

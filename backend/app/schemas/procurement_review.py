@@ -7,7 +7,8 @@ class ProjectCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     project_code: str = Field(min_length=1, max_length=100)
     handling_department: str = Field(min_length=1, max_length=100)
-    project_owner: str = Field(min_length=1, max_length=100)
+    # 前端使用用户 ID；保留字符串兼容旧客户端提交的用户名。
+    project_owner: int | str
 
 
 class ProjectUpdate(BaseModel):

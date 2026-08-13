@@ -57,7 +57,7 @@ function saveReason() {
     <div class="depth" :class="{ weak: !finding.rule_refs.length }">{{ finding.rule_refs.length ? '◉' : '◔' }} {{ matchText }}</div>
     <div class="trace">
       <div class="tl">证据链 / 依据</div>
-      <div class="ti"><span class="ico">▱</span>采购文件 · 第 {{ finding.source.page || '—' }} 页 · {{ finding.source.section_path.join(' / ') || '未识别章节' }}</div>
+      <div v-for="(source, index) in (finding.sources?.length ? finding.sources : [finding.source])" :key="`${source.block_id || 'source'}-${index}`" class="ti"><span class="ico">▱</span>采购文件 · 第 {{ source.page || '—' }} 页 · {{ source.section_path?.join(' / ') || '未识别章节' }}<small v-if="finding.sources?.length && finding.sources.length > 1">（原文定位 {{ index + 1 }} / {{ finding.sources.length }}）</small></div>
       <div v-for="(ref, index) in finding.legal_refs ?? []" :key="`${ref.document_title}-${ref.article_no}-${index}`" class="ti"><span class="ico">⚖</span>{{ ref.document_title }} {{ ref.article_no }}</div>
       <div v-for="rule in finding.rule_refs" :key="rule.id" class="ti"><span class="ico">◇</span>{{ rule.id }}《{{ rule.title }}》</div>
     </div>

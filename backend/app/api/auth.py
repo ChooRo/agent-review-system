@@ -24,3 +24,8 @@ def me(user: CurrentUser) -> dict:
 @router.get("/roles", response_model=list[RoleOut])
 def list_roles(_: CurrentUser, store: AuthData) -> list[dict[str, str]]:
     return store.list_roles()
+
+
+@router.get("/users", response_model=list[UserOut])
+def list_users(_: CurrentUser, store: AuthData) -> list[dict]:
+    return store.list_active_users()

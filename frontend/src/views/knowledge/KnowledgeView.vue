@@ -348,11 +348,18 @@ const candidateTags = computed(() => {
     ['制定机关', document.issuer],
   ].filter(([, value]) => Boolean(value)) as [string, string][]
 })
+const businessWarnings = computed(() => (editingDetail.value?.metadata_extraction?.warnings || [])
+  .map(warningText)
+  .filter((text) => !text.includes('legal_unit_id/quote pair') && !text.includes('INVALID_AI_EVIDENCE')))
+const metadataConfirmed = computed(() => editingDetail.value?.metadata_extraction?.status === 'confirmed')
 
 function statusLabel(value?: string) {
   if (value === 'effective') return '现行有效'
   if (value === 'repealed') return '已失效'
   return '待确认'
+}
+function legalLevelLabel(value?: string) {
+  return ({ law: '法律', administrative_regulation: '行政法规', department_rule: '部门规章', local_regulation: '地方性法规', internal_policy: '内部制度' } as Record<string, string>)[value || ''] || '待确认'
 }
 
 function extractionLabel(value?: MetadataExtractionStatus) {
@@ -504,15 +511,15 @@ onMounted(() => { void loadDocuments() })
     <div v-if="metadataLoading" class="state-card">正在加载候选和原文证据…</div>
     <form v-else-if="editingDetail" @submit.prevent="saveMetadata()">
       <p class="note"><b>Agent 生成候选 → 人工核对编辑 → 确认发布</b><br>{{ editingDocument?.title }} · 原始文件不可覆盖，候选及证据仅在此弹窗内核对和维护。</p>
-      <section class="candidate-panel" :class="{ published: editingDetail.metadata_extraction?.status === 'confirmed' }">
+      <section v-if="editingDetail.metadata_extraction?.status !== 'confirmed'" class="candidate-panel">
         <div class="candidate-head"><div><span class="candidate-kicker">Agent 生成候选</span><h3>{{ candidateDocument?.canonical_title || candidateDocument?.title }}</h3></div><span class="chip extraction-chip" :class="editingDetail.metadata_extraction?.status">{{ extractionLabel(editingDetail.metadata_extraction?.status) }}</span></div>
-        <div v-if="editingDetail.metadata_extraction?.warnings?.length" class="metadata-warnings"><b>需要人工注意</b><span v-for="(warning, index) in editingDetail.metadata_extraction.warnings" :key="index">{{ warningText(warning) }}</span></div>
-        <div v-if="editingDetail.metadata_extraction?.error" class="document-error">{{ editingDetail.metadata_extraction.error }}</div>
+        <div v-if="businessWarnings.length" class="metadata-warnings"><b>需要人工确认</b><span v-for="warning in businessWarnings" :key="warning">{{ warning }}</span></div>
         <p class="candidate-summary">{{ candidateSummary }}</p>
         <div v-if="candidateTags.length" class="candidate-tags"><span v-for="[label, value] in candidateTags" :key="label" class="chip">{{ label }}：{{ value }}</span></div>
       </section>
+      <section v-else class="confirmed-summary"><b>已确认发布</b><p>法规元数据已确认，当前已作为现行有效法规参与后续审查。</p></section>
       <details v-if="editingDetail.metadata_extraction?.audit" class="audit-panel"><summary>查看解析调用记录</summary><div class="audit-line"><b>原文解析</b><span>{{ editingDetail.metadata_extraction.audit.parser?.tool }} → {{ editingDetail.metadata_extraction.audit.parser?.output }}</span></div><div v-for="call in editingDetail.metadata_extraction.audit.calls" :key="call.file" class="audit-call"><div><b>{{ call.status === 'success' ? '成功' : '失败' }}</b><span>{{ call.file }} · {{ call.model || '未记录模型' }}</span></div><div>Skill：{{ call.skill }}　Tool：{{ call.tool }}</div><div>输入：{{ call.input_summary }}</div><div>输出：{{ call.output_summary }}</div><div v-if="call.error" class="audit-error">错误：{{ call.error }}</div></div></details>
-      <div class="upload-grid"><div class="field"><label>文件标题</label><input v-model="metadataTitle" :disabled="savingMetadata" /></div><div class="field"><label>法规正式名称</label><input v-model="metadataCanonicalTitle" :disabled="savingMetadata" /></div></div>
+      <div class="field"><label>法规正式名称 <small>{{ metadataConfirmed ? '已发布法规，可维护' : '解析候选，确认后作为列表主标题' }}</small></label><input v-model="metadataCanonicalTitle" :disabled="savingMetadata" /></div>
       <div class="upload-grid"><div class="field"><label>法律层级</label><select v-model="metadataLegalLevel" :disabled="savingMetadata"><option value="">请选择</option><option value="law">法律</option><option value="administrative_regulation">行政法规</option><option value="department_rule">部门规章</option><option value="local_regulation">地方性法规</option><option value="internal_policy">内部制度</option><option value="other">其他</option></select></div><div class="field"><label>文号 / 令号</label><input v-model="metadataDocumentNumber" :disabled="savingMetadata" /></div></div>
       <div class="upload-grid"><div class="field"><label>制定机关</label><input v-model="metadataIssuer" :disabled="savingMetadata" /></div><div class="field"><label>归口部门</label><input v-model="metadataDepartment" :disabled="savingMetadata" /></div></div>
       <div class="upload-grid"><div class="field"><label>文档版本</label><input v-model="metadataDocumentVersion" :disabled="savingMetadata" /></div><div class="field"><label>通过日期</label><input v-model="metadataAdoptionDate" type="date" :disabled="savingMetadata" /></div></div>
@@ -520,15 +527,15 @@ onMounted(() => { void loadDocuments() })
       <div class="upload-grid"><div class="field"><label>最近修订日期</label><input v-model="metadataRevisionDate" type="date" :disabled="savingMetadata" /></div><div class="field"><label>当前版本施行日期</label><input v-model="metadataCurrentVersionEffectiveDate" type="date" :disabled="savingMetadata" /></div></div>
       <div class="field"><label>失效日期</label><input v-model="metadataExpiryDate" type="date" :disabled="savingMetadata" /></div>
       <div class="field"><label>适用范围摘要</label><textarea v-model="metadataScope" :disabled="savingMetadata" /></div>
-      <section class="edit-scope">
+      <section v-if="editingDetail.metadata_extraction?.status !== 'confirmed'" class="edit-scope">
         <div class="scope-group-title">结构化适用范围 <span>修改内容不删除提取证据</span></div>
         <template v-for="group in applicabilityGroups" :key="group.key">
           <div v-if="metadataApplicability[group.key]?.length" class="field"><label>{{ group.label }}</label><div v-for="(item, index) in metadataApplicability[group.key]" :key="`${group.key}-${index}`" class="candidate-edit-row"><input v-model="item.value" :disabled="savingMetadata" /><span class="chip">{{ confidenceLabel(item.confidence) }}</span><details v-if="item.evidence?.length"><summary>{{ item.evidence.length }} 条证据</summary><p v-for="evidence in item.evidence" :key="`${evidence.legal_unit_id}-${evidence.quote}`">{{ evidenceLabel(evidence) }}：{{ evidence.quote }}</p></details></div></div>
         </template>
       </section>
       <p v-if="metadataError" class="upload-error">{{ metadataError }}</p>
-      <div class="modal-foot"><button class="btn" type="button" :disabled="savingMetadata" @click="editingDocument = undefined">取消</button><button class="btn" type="submit" :disabled="savingMetadata">{{ savingMetadata ? '正在保存…' : '保存候选' }}</button><button v-if="editingDocument.status === 'effective'" class="btn" type="button" :disabled="savingMetadata" @click="saveMetadata('repealed')">标记失效</button><button v-if="(editingDocument.status ?? 'unknown') === 'unknown'" class="btn pri" type="button" :disabled="savingMetadata || editingDetail.metadata_extraction?.status !== 'ready'" @click="saveMetadata('effective')">确认发布</button></div>
-      <p v-if="editingDetail.metadata_extraction?.status !== 'ready' && editingDocument.status !== 'effective'" class="publish-hint">只有提取状态为“候选待确认”时才能发布。</p>
+      <div class="modal-foot"><button class="btn" type="button" :disabled="savingMetadata" @click="editingDocument = undefined">取消</button><button v-if="metadataConfirmed" class="btn pri" type="submit" :disabled="savingMetadata">{{ savingMetadata ? '正在保存…' : '保存维护信息' }}</button><button v-else class="btn" type="submit" :disabled="savingMetadata">{{ savingMetadata ? '正在保存…' : '保存候选' }}</button><button v-if="editingDocument.status === 'effective'" class="btn" type="button" :disabled="savingMetadata" @click="saveMetadata('repealed')">标记失效</button><button v-if="(editingDocument.status ?? 'unknown') === 'unknown'" class="btn pri" type="button" :disabled="savingMetadata || editingDetail.metadata_extraction?.status !== 'ready'" @click="saveMetadata('effective')">确认并发布</button></div>
+      <p v-if="editingDetail.metadata_extraction?.status !== 'ready' && editingDocument.status !== 'effective'" class="publish-hint">请先核对 Agent 候选信息，再点击“确认并发布”。该操作会同时保存信息并使法规生效。</p>
     </form>
     <p v-if="metadataError && !editingDetail" class="upload-error">{{ metadataError }}</p>
   </BaseModal>
@@ -563,6 +570,9 @@ onMounted(() => { void loadDocuments() })
 .extraction-details[open] > summary { margin-bottom:2px; }
 .field-evidence { display:block; margin-top:3px; color:var(--terra); font-size:9px; font-weight:500; }
 .metadata-warnings { display:grid; gap:4px; margin:12px 0; padding:10px 12px; border-radius:8px; background:var(--ochre-soft); color:var(--ochre); font-size:11px; }
+.confirmed-summary { margin-bottom:14px; padding:12px 14px; border:1px solid rgba(72,128,89,.3); border-left:3px solid var(--green); border-radius:9px; background:#fbfdf9; color:var(--olive); font-size:11px; }
+.confirmed-summary b { color:var(--green); }
+.confirmed-summary p { margin:5px 0 0; }
 .metadata-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:1px; margin:14px 0; overflow:hidden; border:1px solid var(--border); border-radius:9px; background:var(--border); }
 .metadata-grid div { padding:9px 10px; background:var(--white); }
 .metadata-grid dt { color:var(--stone); font-size:9.5px; }

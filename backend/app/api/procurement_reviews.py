@@ -30,6 +30,8 @@ def upload_document(project_id: str, task_id: str, user: CurrentUser, service: S
 def start_task(project_id: str, task_id: str, user: CurrentUser, service: Service, idempotency_key: IdempotencyKey = None): return service.start(project_id, task_id, user, idempotency_key)
 @router.get("/{project_id}/procurement-review-tasks/{task_id}/events", response_model=list[EventOut])
 def events(project_id: str, task_id: str, user: CurrentUser, service: Service, after: str | None = Query(default=None)): return service.events(project_id, task_id, user, after)
+@router.get("/{project_id}/procurement-review-tasks/{task_id}/debug-traces")
+def debug_traces(project_id: str, task_id: str, user: CurrentUser, service: Service): return service.debug_traces(project_id, task_id, user)
 @router.get("/{project_id}/procurement-review-tasks/{task_id}/findings", response_model=list[FindingOut])
 def list_findings(project_id: str, task_id: str, user: CurrentUser, service: Service): return service.findings_for_task(project_id, task_id, user)
 @router.put("/{project_id}/procurement-review-tasks/{task_id}/findings/{finding_id}/operator-disposition")

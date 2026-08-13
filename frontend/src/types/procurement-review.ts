@@ -34,7 +34,8 @@ export interface Project {
 export interface Finding {
   id: string; task_id: string; risk_level: RiskLevel; category: string; title: string
   description: string; suggestion: string
-  source: { page: number; section_path: string[]; quote: string; block_id: string }
+    source: { page: number; section_path: string[]; quote: string; block_id: string }
+    sources?: { page?: number; section_path?: string[]; quote: string; block_id?: string }[]
   /** 法规文档解析出的引用，仅作法规依据展示，不等同于执行规则。 */
   legal_refs?: { document_title: string; article_no: string; quote: string }[]
   /** 已发布且命中的执行规则；当前任务可能为空。 */
@@ -63,4 +64,4 @@ export interface ReviewTask {
   /** 仅含正式适用法规的冻结上下文。 */
   legal_context_freeze?: LegalSourceFreeze[]
 }
-export interface CreateProjectPayload { name: string; project_code: string; handling_department: string; project_owner: string }
+export interface CreateProjectPayload { name: string; project_code: string; handling_department: string; project_owner: number }

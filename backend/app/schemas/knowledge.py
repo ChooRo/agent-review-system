@@ -6,6 +6,9 @@ from pydantic import BaseModel, Field
 class KnowledgeDocumentOut(BaseModel):
     document_key: str
     title: str
+    canonical_title: str | None = None
+    legal_level: str | None = None
+    document_number: str | None = None
     issuer: str | None = None
     effective_date: str | None = None
     expiry_date: str | None = None

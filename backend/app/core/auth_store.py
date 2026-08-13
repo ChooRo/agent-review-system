@@ -33,6 +33,10 @@ class AuthStore:
     def list_roles(self) -> list[dict[str, str]]:
         return [{"code": role["code"], "name": role["name"]} for role in self._read()["roles"]]
 
+    def list_active_users(self) -> list[dict[str, Any]]:
+        data = self._read()
+        return [self._hydrate(user, data["roles"]) for user in data["users"] if user.get("is_active")]
+
     def _hydrate(self, user: dict[str, Any], role_rows: list[dict[str, Any]]) -> dict[str, Any]:
         roles = {role["code"]: role for role in role_rows}
         return {**user, "roles": [roles[code] for code in user.get("role_codes", [])]}
