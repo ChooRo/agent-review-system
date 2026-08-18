@@ -1,9 +1,8 @@
 """审查 Agent 可用 Tool 的统一注册入口。"""
 
-from . import (
-    contract_tools, document_tools, ledger_tools, procurement_tools, rectification_tools,
-    response_tools, retrieval_tools, rule_tools, validation_tools,
-)
+from .common import document, ledger, retrieval, validation
+from .legal import rules
+from .procurement import contract, rectification, response, review
 from .registry import ToolRegistry
 from .schemas import ToolContext, ToolResult
 
@@ -15,17 +14,21 @@ COMMON = {
 }
 AGENT_TOOL_ALLOWLISTS = {
     "workflow": COMMON,
-    "procurement_review_agent": COMMON | {"get_procurement_topic_view", "check_required_elements", "compare_document_versions", "map_finding_to_new_version"},
+    "procurement_review_agent": COMMON | {"get_procurement_topic_view", "check_required_elements", "evaluate_rule_coverage", "compare_procurement_sections", "compare_document_versions", "map_finding_to_new_version"},
     "response_review_agent": COMMON | {"get_procurement_requirement", "search_response_evidence"},
     "contract_review_agent": COMMON | {"get_three_party_item", "check_commitment_transfer", "compare_document_versions", "map_finding_to_new_version"},
 }
 
 
 def build_registry(event=None) -> ToolRegistry:
-    """创建默认注册表。输入可选事件函数；输出带白名单的 ToolRegistry。"""
+    """作用：创建审核 Agent 使用的默认工具注册表。
+    输入：event 为可选审计事件回调。
+    输出：配置好工具实现和 Agent 白名单的 ToolRegistry。
+    逻辑：扫描业务工具模块中的公开函数，再连同白名单和回调构造注册表。
+    """
     modules = (
-        document_tools, ledger_tools, retrieval_tools, rule_tools, validation_tools,
-        procurement_tools, response_tools, contract_tools, rectification_tools,
+        document, ledger, retrieval, rules, validation,
+        review, response, contract, rectification,
     )
     tools = {
         name: value for module in modules for name, value in vars(module).items()

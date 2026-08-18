@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import BaseModal from '../../components/base/BaseModal.vue'
 import { apiErrorMessage } from '../../api'
-import { createTask, getProject, listTasks, retryTask } from '../../api/procurement-review'
+import { createTask, getProject, listTasks, lockFinal, retryTask, uploadRectification } from '../../api/procurement-review'
 import type { Project, ReviewTask } from '../../types/procurement-review'
 
 const route = useRoute()
@@ -22,6 +22,7 @@ const projectId = computed(() => String(route.params.projectId))
 const error = ref('')
 const retryingTaskIds = ref(new Set<string>())
 const taskErrors = ref<Record<string, string>>({})
+const rectifyingTaskIds = ref(new Set<string>())
 let progressTimer: number | undefined
 let refreshInFlight = false
 
@@ -30,9 +31,10 @@ function selectType(mode: 'single' | 'dual' | 'triple') { if (mode !== 'single')
 function backToStep1() { createStep.value = 1 }
 
 const statusLabel: Record<string, string> = {
-  draft: '草稿', parsing: '解析中', reviewing: 'AI 审查中',
+  draft: '草稿', parsing: '解析中', reviewing: 'AI 审查中', applicability_review: '待确认适用法规',
   operator_review: '待经办处理', primary_review: '待主责复核',
   primary_recheck: '待主责再次复核', completed: '已完成',
+  rectification_draft: '整改版待审查', final_locked: '终版已锁定',
   failed: '处理失败', cancelled: '已取消', queued: '排队中',
 }
 
@@ -45,7 +47,13 @@ function taskProgress(task: ReviewTask) {
 function progressStage(task: ReviewTask) {
   if (task.status === 'queued') return '等待解析'
   if (task.status === 'parsing') return '文档解析'
-  if (task.status === 'reviewing') return 'AI 审查与适用法规匹配'
+  const labels: Record<string, string> = {
+    parse_documents: 'MinerU 文档解析', quality_check: '解析质量检查', structure_profile: '文档结构理解',
+    build_logical_units: '逻辑单元重建', assemble_review_batches: 'Review Batch 校验', extract_candidates: '大模型分批业务理解',
+    build_ledger: '全局归并与采购台账', build_scene_view: '采购主题视图', global_validation: '文件全局检查',
+    match_rules: '规则与全量法规装载', agent_review: '采购文件专业审查', validate_evidence: '独立证据校验', final_report: '生成审查结果',
+  }
+  if (task.status === 'reviewing') return labels[task.progress_step ?? ''] || '采购文件专业审查'
   return ''
 }
 function stopProgressPolling() {
@@ -126,8 +134,24 @@ function taskAction(task: ReviewTask) {
   router.push({ name: 'procurement-workbench', params: { projectId: projectId.value, taskId: task.id } })
 }
 
+async function onRectificationFile(task: ReviewTask, event: Event) {
+  const input = event.target as HTMLInputElement
+  const selected = input.files?.[0]
+  input.value = ''
+  if (!selected || rectifyingTaskIds.value.has(task.id)) return
+  rectifyingTaskIds.value = new Set(rectifyingTaskIds.value).add(task.id)
+  try { await uploadRectification(projectId.value, task.id, selected); await refreshTasks() }
+  catch (reason) { taskErrors.value = { ...taskErrors.value, [task.id]: apiErrorMessage(reason) } }
+  finally { const next = new Set(rectifyingTaskIds.value); next.delete(task.id); rectifyingTaskIds.value = next }
+}
+
+async function lockTaskFinal(task: ReviewTask) {
+  try { await lockFinal(projectId.value, task.id); await refreshTasks() }
+  catch (reason) { taskErrors.value = { ...taskErrors.value, [task.id]: apiErrorMessage(reason) } }
+}
+
 function statusClass(status: string) {
-  if (status === 'completed' || status === 'cancelled') return 'done'
+  if (status === 'completed' || status === 'final_locked' || status === 'cancelled') return 'done'
   if (status === 'failed') return 'done'
   if (status === 'queued' || status === 'parsing' || status === 'reviewing') return 'doing'
   return 'todo'
@@ -194,7 +218,7 @@ onUnmounted(stopProgressPolling)
             </div>
             <div class="subtask-status-cell">
               <span class="pill" :class="statusClass(task.status)">{{ statusLabel[task.status] ?? task.status }}</span>
-              <div v-if="isActiveTask(task)" class="subtask-progress">
+              <div v-if="isActiveTask(task)" class="subtask-progress running">
                 <i :style="{ width: `${taskProgress(task)}%` }"></i>
               </div>
               <div v-if="isActiveTask(task)" class="subtask-progress-meta">
@@ -209,32 +233,37 @@ onUnmounted(stopProgressPolling)
             </div>
             <div class="subtask-result">{{ task.updated_at?.slice(0, 10) ?? task.created_at?.slice(0, 10) ?? '—' }}</div>
             <div class="task-row-actions">
+              <button class="btn" @click="router.push({ name: 'task-debug', params: { projectId: projectId, taskId: task.id } })">调试</button>
               <button
                 class="btn"
                 :class="{ pri: task.status !== 'completed' && !isActiveTask(task) }"
                 :disabled="isActiveTask(task) || isRetrying(task.id)"
                 @click="task.status === 'failed' ? retryFailedTask(task) : taskAction(task)"
               >
-                <template v-if="isActiveTask(task)">解析中</template>
+                <template v-if="isActiveTask(task)">{{ statusLabel[task.status] || '处理中' }}</template>
                 <template v-else-if="task.status === 'completed'">查看</template>
                 <template v-else-if="task.status === 'failed'">{{ isRetrying(task.id) ? '正在重试…' : '重新处理' }}</template>
                 <template v-else>进入</template>
               </button>
+              <label v-if="task.status === 'completed' && task.task_role === 'operator' && !task.final_baseline" class="btn">
+                {{ rectifyingTaskIds.has(task.id) ? '上传中…' : '上传整改版' }}
+                <input type="file" accept=".doc,.docx,.pdf" hidden :disabled="rectifyingTaskIds.has(task.id)" @change="onRectificationFile(task, $event)" />
+              </label>
+              <button v-if="task.status === 'completed' && task.task_role === 'primary_supervisor' && !task.final_baseline" class="btn pri" @click="lockTaskFinal(task)">锁定终版</button>
             </div>
           </div>
         </div>
       </div>
 
       <div v-else class="empty" style="min-height:300px;display:flex;flex-direction:column;align-items:center;justify-content:center;margin-top:0">
-        <span style="font-size:32px;opacity:.4">📄</span>
-        <div style="margin-top:12px;font:18px var(--serif);color:var(--ink)">项目下暂无审查任务</div>
+        <div style="font:18px var(--serif);color:var(--ink)">项目下暂无审查任务</div>
         <div style="margin-top:6px;color:var(--stone);font-size:12px;text-align:center">创建项目不会上传文件，请在这里创建具体审查任务。</div>
       </div>
 
       <div class="future-tasks">
         <span>响应文件审核 · 暂未开放</span>
         <span>合同审核 · 暂未开放</span>
-        <span>整改核销 · 暂未开放</span>
+        <span>整改核销 · 已接入任务版本链</span>
       </div>
     </template>
 
@@ -283,8 +312,13 @@ onUnmounted(stopProgressPolling)
       </div>
       <div class="field" style="margin-bottom:12px">
         <label>采购文件</label>
-        <input type="file" accept=".doc,.docx,.pdf" required @change="onFile" />
-        <span style="font-size:10px;color:var(--stone);margin-top:4px">仅上传一个文件，支持 DOC、DOCX、PDF。</span>
+        <label class="file-picker" :class="{ selected: file }">
+          <input type="file" accept=".doc,.docx,.pdf" required @change="onFile" />
+          <span class="file-icon" aria-hidden="true">↥</span>
+          <span class="file-copy"><b>{{ file ? file.name : '选择采购文件' }}</b><small>{{ file ? `${(file.size / 1024 / 1024).toFixed(2)} MB · 点击重新选择` : '点击浏览本地文件，或将文件拖放到此处' }}</small></span>
+          <em>{{ file ? '已选择' : '浏览文件' }}</em>
+        </label>
+        <span class="file-hint">仅上传 1 个文件 · 支持 DOC、DOCX、PDF</span>
       </div>
       <p v-if="uploadError" style="color:var(--crimson);font-size:12px;margin:0 0 12px">{{ uploadError }}</p>
       <div class="modal-foot">

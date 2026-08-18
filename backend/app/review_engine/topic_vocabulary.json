@@ -1,0 +1,28 @@
+{
+  "version": "1.0.0",
+  "topics": {
+    "project_code": {"aliases": ["project_code"], "terms": ["项目编号", "采购编号", "招标编号"]},
+    "project_budget": {"aliases": ["project_budget"], "terms": ["采购预算", "项目预算", "预算金额", "预算规模"]},
+    "procurement_method": {"aliases": ["procurement_method"], "terms": ["采购方式", "招标方式", "公开招标", "邀请招标", "竞争性谈判", "竞争性磋商", "询价采购"]},
+    "submission_deadline": {"aliases": ["submission_deadline"], "terms": ["提交截止", "响应截止", "投标截止", "开标时间"]},
+    "qualification": {"aliases": ["qualification"], "terms": ["资格条件", "资格要求", "供应商资格", "投标人资格"]},
+    "mandatory_rejection": {"aliases": ["mandatory_rejection"], "terms": ["否决投标", "否决响应", "无效响应", "废标条件"]},
+    "technical_parameter": {"aliases": ["technical_parameter"], "terms": ["技术参数", "技术要求", "技术标准", "性能指标"]},
+    "service_period": {"aliases": ["service_period"], "terms": ["服务期限", "服务期", "履行期限", "合同期限"]},
+    "delivery_deadline": {"aliases": ["delivery_deadline"], "terms": ["交付期限", "交货期限", "交付时间", "交货时间"]},
+    "delivery_location": {"aliases": ["delivery_location"], "terms": ["交付地点", "交货地点", "服务地点", "履行地点"]},
+    "acceptance_standard": {"aliases": ["acceptance_standard"], "terms": ["验收标准", "验收条件", "验收方法", "验收要求"]},
+    "evaluation_score": {"aliases": ["evaluation_score"], "terms": ["评分标准", "评分办法", "评审标准", "评标办法", "分值"]},
+    "price_ceiling": {"aliases": ["price_ceiling"], "terms": ["最高限价", "最高响应限价", "控制价", "限价"]},
+    "payment_term": {"aliases": ["payment_term"], "terms": ["付款条件", "付款方式", "支付条件", "结算方式"]},
+    "bid_bond": {"aliases": ["bid_bond"], "terms": ["投标保证金", "响应保证金", "保证金比例", "保证金金额"]},
+    "warranty": {"aliases": ["warranty"], "terms": ["质保期", "质量保证", "保修期", "售后服务"]},
+    "breach_liability": {"aliases": ["breach_liability"], "terms": ["违约责任", "违约金", "赔偿责任"]},
+    "response_material": {"aliases": ["response_material"], "terms": ["响应材料", "证明材料", "投标文件", "响应文件"]},
+    "collusive_bidding": {"aliases": ["collusive_bidding"], "terms": ["串通投标", "围标", "陪标"]},
+    "invalid_bid": {"aliases": ["invalid_bid"], "terms": ["投标无效", "中标无效", "响应无效"]},
+    "subcontracting": {"aliases": ["subcontracting"], "terms": ["转包", "违法分包", "分包限制"]},
+    "contract_termination": {"aliases": ["contract_termination"], "terms": ["合同解除", "终止合同", "解除合同"]},
+    "other": {"aliases": ["other"], "terms": []}
+  }
+}

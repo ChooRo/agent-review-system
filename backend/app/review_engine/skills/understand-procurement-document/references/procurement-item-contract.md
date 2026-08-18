@@ -68,7 +68,7 @@
 附件与引用
 ```
 
-`requirement_type`使用稳定英文键，例如：
+`requirement_type`使用`backend/app/review_engine/topic_vocabulary.json`中的稳定英文键。采购侧常用键例如：
 
 ```text
 project_budget
@@ -76,17 +76,20 @@ submission_deadline
 qualification
 mandatory_rejection
 technical_parameter
+service_period
 delivery_deadline
+delivery_location
 acceptance_standard
 evaluation_score
 price_ceiling
 payment_term
+bid_bond
 warranty
 breach_liability
 response_material
 ```
 
-未知类型使用`other`并在`attributes`中保留业务名称，不临时创造不受控枚举。
+未知类型使用`other`并在`attributes.original_requirement_type`中保留模型原值，不临时创造不受控枚举。进入`source_assertion`后同时保存受控`topics`；法规单元使用同一词表，二者只能按词表键连接。
 
 ## 4. 证据与关系
 

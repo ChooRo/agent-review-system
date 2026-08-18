@@ -16,14 +16,13 @@ from app.core.config import get_settings
 from app.policies import knowledge as knowledge_policy
 from app.repositories.json_store import JsonStore
 from app.repositories.knowledge_repository import KnowledgeRepository
-from app.review_engine.services.legal_knowledge import ingest_legal_document
-from app.review_engine.services.legal_knowledge import check_legal_quality
-from app.review_engine.services.legal_metadata import extract_applicability, prepare_metadata_extraction
+from app.review_engine.services.legal.knowledge import check_legal_quality, ingest_legal_document
+from app.review_engine.services.legal.metadata import extract_applicability, prepare_metadata_extraction
 from app.review_engine.services.llm import LLMService
 from app.review_engine.services.mineru import MinerUService
 from app.review_engine.services.runtime import RunStore
 from app.review_engine.settings import load_settings as load_review_settings
-from app.services.procurement_review import ALLOWED_TYPES
+from app.services.procurement.review import ALLOWED_TYPES
 
 
 class KnowledgeService:
@@ -32,7 +31,7 @@ class KnowledgeService:
     _tasks_lock = threading.Lock()
     _parse_retries = 3
     def __init__(self) -> None:
-        self.repository = KnowledgeRepository(Path(__file__).resolve().parents[3] / "knowledge" / "rules", Path(get_settings().data_dir))
+        self.repository = KnowledgeRepository(Path(__file__).resolve().parents[4] / "knowledge" / "rules", Path(get_settings().data_dir))
 
     @staticmethod
     def _now() -> str:
@@ -50,7 +49,7 @@ class KnowledgeService:
 
     @staticmethod
     def _metadata_audit(value: dict[str, Any], extraction: dict[str, Any], key: str) -> dict[str, Any]:
-        traces = Path(__file__).resolve().parents[3] / "knowledge" / "rules" / key / "metadata_extraction" / "llm_traces"
+        traces = Path(__file__).resolve().parents[4] / "knowledge" / "rules" / key / "metadata_extraction" / "llm_traces"
         calls = []
         for path in sorted(traces.glob("legal_metadata_*.json")) if traces.is_dir() else []:
             try:
@@ -124,7 +123,7 @@ class KnowledgeService:
         extraction = prepare_metadata_extraction(knowledge, document)
         candidate_ids = set(extraction.get("candidate_unit_ids", []))
         candidates = [unit for unit in knowledge.get("units", []) if unit.get("legal_unit_id") in candidate_ids]
-        config_path = Path(__file__).resolve().parents[2] / "review_config.json"
+        config_path = Path(__file__).resolve().parents[3] / "review_config.json"
         config = load_review_settings(config_path if config_path.is_file() else None).get("llm", {})
         if not all(config.get(name) for name in ("api_url", "api_key", "model")):
             extraction.update({"status": "pending_ai", "updated_at": self._now()})

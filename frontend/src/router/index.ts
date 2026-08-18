@@ -32,6 +32,11 @@ const router = createRouter({
           component: () => import('../views/procurement-review/ReviewWorkbenchView.vue'),
         },
         {
+          path: 'debug/tasks/:projectId/:taskId',
+          name: 'task-debug',
+          component: () => import('../views/debug/TaskDebugView.vue'),
+        },
+        {
           path: 'projects/:projectId/archive',
           name: 'project-archive',
           component: () => import('../views/procurement-review/LockedFeatureView.vue'),

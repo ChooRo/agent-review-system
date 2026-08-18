@@ -9,8 +9,9 @@ from typing import Any
 from xml.etree import ElementTree as ET
 from zipfile import ZipFile
 
-from .mineru import MinerUService, namespace_block_ids
-from .runtime import write_json
+from ..mineru import MinerUService, namespace_block_ids
+from ..runtime import write_json
+from ..topics import dictionary_topics
 
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -198,6 +199,7 @@ def make_unit(
         "text": text,
         "parent_context": parent_paragraph or None,
         "search_text": context,
+        "topics": dictionary_topics(context),
         "references": sorted(set(match.replace(" ", "") for match in REFERENCE_RE.findall(text))),
         "effective_date": metadata.get("effective_date"),
         "status": metadata.get("status", "unknown"),

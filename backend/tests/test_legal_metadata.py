@@ -1,4 +1,4 @@
-from app.review_engine.services.legal_metadata import (
+from app.review_engine.services.legal.metadata import (
     candidate_batches,
     extract_applicability,
     load_skill_instructions,
@@ -66,7 +66,7 @@ def test_applicability_summary_is_two_to_three_lines_when_evidence_is_complete()
         "exclusions": [{"value": "法律另有规定的除外", "evidence": evidence}],
         "precedence_rules": [],
     }
-    from app.review_engine.services.legal_metadata import summarize_applicability
+    from app.review_engine.services.legal.metadata import summarize_applicability
 
     summary = summarize_applicability(applicability)
     assert 80 <= len(summary) <= 160
@@ -80,6 +80,30 @@ def test_selection_does_not_treat_every_mandatory_tender_clause_as_scope() -> No
     assert units[49] in selected
     assert len(selected) <= 24
     assert len(candidate_batches(selected)) == 1
+
+
+def test_selection_includes_context_before_referential_scope_clause() -> None:
+    units = [unit(index, "一般规定") for index in range(1, 20)]
+    units[9]["text"] = units[9]["search_text"] = "政府投资项目包括工程、货物和服务。"
+    units[10]["text"] = units[10]["search_text"] = "前款项目适用本办法。"
+    selected = select_candidate_units(units)
+    assert units[9] in selected and units[10] in selected
+
+
+def test_applicability_summary_never_cuts_a_sentence_midway() -> None:
+    from app.review_engine.services.legal.metadata import summarize_applicability
+
+    long_boundary = "涉及国家安全、国家秘密、抢险救灾或者属于利用扶贫资金实行以工代赈、需要使用农民工等特殊情况，不适宜进行招标的项目"
+    applicability = {
+        "activities": [{"value": "招标投标活动" * 20}],
+        "subjects": [], "business_phases": [], "trigger_conditions": [],
+        "project_types": [], "exclusions": [{"value": long_boundary}], "precedence_rules": [],
+    }
+    summary = summarize_applicability(applicability)
+    assert len(summary) <= 160
+    assert summary.endswith("。")
+    assert not summary.endswith("利用扶")
+    assert "具体适用以展开的法规条文证据为准" in summary
 
 
 def test_prepare_infers_named_regulation_instead_of_order_heading() -> None:

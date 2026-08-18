@@ -17,8 +17,8 @@ const pendingPrimaryAction = ref<PrimaryPendingAction | null>(null)
 const editingOpinion = ref(false)
 const note = ref('')
 const decisionRisk = ref<RiskLevel>(props.finding.risk_level)
-const riskClass: Record<RiskLevel, string> = { high: 'high', medium: 'mid', low: 'pass', unknown: 'unknown' }
-const riskLabel: Record<RiskLevel, string> = { high: '不一致（高）', medium: '不一致（中）', low: '低风险', unknown: '无法判断' }
+const riskClass: Record<RiskLevel, string> = { high: 'high', medium: 'mid', low: 'pass', pending: 'pending', unknown: 'unknown' }
+const riskLabel: Record<RiskLevel, string> = { high: '不一致（高）', medium: '不一致（中）', low: '低风险', pending: '待人工定级', unknown: '识别质量不足' }
 const actionLabel: Record<OperatorAction, string> = { accept: '采纳', partial_accept: '部分采纳', reject: '不采纳' }
 const operatorStatus = computed(() => {
   const action = props.finding.operator_disposition?.action
@@ -53,12 +53,13 @@ function saveReason() {
   <div class="card appear" :class="riskClass[finding.risk_level]" @click="emit('select')">
     <div class="ctop"><span class="risk" :class="riskClass[finding.risk_level]">{{ riskLabel[finding.risk_level] }}</span><span class="ctitle">{{ finding.title }}</span></div>
     <div class="cbody">{{ finding.description }}<template v-if="finding.suggestion"><br>建议：{{ finding.suggestion }}</template></div>
-    <button class="link-btn locate-original" type="button" @click.stop="emit('locate')">定位原文 →</button>
+    <button class="link-btn locate-original" type="button" @click.stop="emit('locate')">定位原文<span v-if="finding.sources?.length && finding.sources.length > 1">（{{ finding.sources.length }} 处）</span> →</button>
+    <div class="evidence-state" :class="finding.evidence_status === 'verified' ? 'verified' : 'insufficient'">{{ finding.evidence_status === 'verified' ? '证据已校验' : '证据需人工补充或核对' }}</div>
     <div class="depth" :class="{ weak: !finding.rule_refs.length }">{{ finding.rule_refs.length ? '◉' : '◔' }} {{ matchText }}</div>
     <div class="trace">
       <div class="tl">证据链 / 依据</div>
       <div v-for="(source, index) in (finding.sources?.length ? finding.sources : [finding.source])" :key="`${source.block_id || 'source'}-${index}`" class="ti"><span class="ico">▱</span>采购文件 · 第 {{ source.page || '—' }} 页 · {{ source.section_path?.join(' / ') || '未识别章节' }}<small v-if="finding.sources?.length && finding.sources.length > 1">（原文定位 {{ index + 1 }} / {{ finding.sources.length }}）</small></div>
-      <div v-for="(ref, index) in finding.legal_refs ?? []" :key="`${ref.document_title}-${ref.article_no}-${index}`" class="ti"><span class="ico">⚖</span>{{ ref.document_title }} {{ ref.article_no }}</div>
+      <div v-for="(ref, index) in finding.legal_refs ?? []" :key="`${ref.document_title}-${ref.article_no}-${index}`" class="ti legal-trace"><span class="ico">⚖</span><span><b>{{ ref.document_title }} {{ ref.article_no }}</b><small v-if="ref.quote">{{ ref.quote }}</small></span></div>
       <div v-for="rule in finding.rule_refs" :key="rule.id" class="ti"><span class="ico">◇</span>{{ rule.id }}《{{ rule.title }}》</div>
     </div>
 
@@ -78,7 +79,7 @@ function saveReason() {
         <button class="btn anno-btn" :class="{ on: finding.primary_decision?.decision === 'receive' }" type="button" @click="$emit('decision', 'receive', '', undefined)">接收</button>
         <button class="btn anno-btn" :class="{ on: finding.primary_decision?.decision === 'adjust' }" type="button" @click="pendingPrimaryAction = 'adjust'">调整</button>
         <button class="btn anno-btn" :class="{ on: finding.primary_decision?.decision === 'reject' }" type="button" @click="pendingPrimaryAction = 'reject'">拒绝</button>
-        <div v-if="pendingPrimaryAction" class="anno-note"><b>{{ pendingPrimaryAction === 'adjust' ? '调整意见' : '拒绝原因' }}（必填）</b><textarea v-model="note" class="inline-reason" placeholder="请填写主责监督意见" /><select v-if="pendingPrimaryAction === 'adjust'" v-model="decisionRisk" class="inline-risk"><option value="high">高风险</option><option value="medium">中风险</option><option value="low">低风险</option><option value="unknown">无法判断</option></select><div class="anno-reason-actions"><button class="btn anno-btn" type="button" @click="pendingPrimaryAction = null">取消</button><button class="btn pri anno-btn" type="button" :disabled="!note.trim()" @click="$emit('decision', pendingPrimaryAction, note, pendingPrimaryAction === 'adjust' ? decisionRisk : undefined); pendingPrimaryAction = null">确认</button></div></div>
+        <div v-if="pendingPrimaryAction" class="anno-note"><b>{{ pendingPrimaryAction === 'adjust' ? '调整意见' : '拒绝原因' }}（必填）</b><textarea v-model="note" class="inline-reason" placeholder="请填写主责监督意见" /><select v-if="pendingPrimaryAction === 'adjust'" v-model="decisionRisk" class="inline-risk"><option value="high">高风险</option><option value="medium">中风险</option><option value="low">低风险</option><option value="pending">待人工定级</option><option value="unknown">识别质量不足</option></select><div class="anno-reason-actions"><button class="btn anno-btn" type="button" @click="pendingPrimaryAction = null">取消</button><button class="btn pri anno-btn" type="button" :disabled="!note.trim()" @click="$emit('decision', pendingPrimaryAction, note, pendingPrimaryAction === 'adjust' ? decisionRisk : undefined); pendingPrimaryAction = null">确认</button></div></div>
         <div v-if="finding.operator_disposition?.comment" class="anno-note"><b>经办意见：</b>{{ finding.operator_disposition.comment }}</div>
         <div v-if="finding.primary_decision?.comment" class="anno-note"><b>主责监督意见：</b>{{ finding.primary_decision.comment }}</div>
       </template>

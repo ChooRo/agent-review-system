@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from app.core.config import get_settings
-from app.review_engine.services.workflow import WorkflowEngine
+from app.review_engine.services.procurement.workflow import WorkflowEngine
 
 
 class Store:
@@ -10,7 +10,7 @@ class Store:
         pass
 
 
-def test_workflow_retrieves_only_effective_confirmed_legal_documents(tmp_path: Path, monkeypatch) -> None:
+def test_workflow_retrieves_all_effective_legal_documents_when_gate_is_disabled(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "knowledge"
     for status in ("effective", "effective_unconfirmed", "unknown", "repealed"):
         directory = root / status; directory.mkdir(parents=True)
@@ -26,7 +26,7 @@ def test_workflow_retrieves_only_effective_confirmed_legal_documents(tmp_path: P
     engine = WorkflowEngine(tmp_path / "runs", skills, {"rules": {"knowledge_root": str(root)}})
     engine._previous = lambda _store, step: {} if step == "build_scene_view" else {"ledgers": {"procurement": [{"statement": "procurement evidence"}]}}
     result = engine._match_rules(Store(), {"scenario": "procurement"}, None, None)
-    assert [item["source"]["document_key"] for item in result["legal_documents"]] == ["effective"]
-    assert result["legal_source_stats"] == {"included": 1, "excluded_unknown": 1, "excluded_repealed": 1, "excluded_unconfirmed_profile": 1, "excluded_other": 0}
+    assert [item["source"]["document_key"] for item in result["legal_documents"]] == ["effective", "effective_unconfirmed"]
+    assert result["legal_source_stats"] == {"included": 2, "excluded_unknown": 1, "excluded_repealed": 1, "excluded_unconfirmed_profile": 0, "excluded_other": 0}
     assert all("path" not in source for source in result["legal_sources"])
     get_settings.cache_clear()

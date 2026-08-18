@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 from app.api.deps import CurrentUser
 from app.schemas.knowledge import KnowledgeDocumentOut, KnowledgeDocumentUpdate
 from app.schemas.rule import RuleOut
-from app.services.knowledge import KnowledgeService
+from app.services.legal.knowledge import KnowledgeService
 from app.policies import knowledge as knowledge_policy
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])

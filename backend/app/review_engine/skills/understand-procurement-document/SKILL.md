@@ -1,99 +1,23 @@
 ---
 name: understand-procurement-document
-description: Extract traceable atomic procurement requirements from a procurement or tender document using its Document JSON and whole-document structure profile. Use to build candidate items for qualification, technical and acceptance requirements, evaluation and scoring, commercial pricing and payment, contract performance, schedules, attachments, and required response materials before compliance review or cross-file comparison. Do not use to issue final legal conclusions.
+description: Extract traceable atomic procurement requirements from procurement-document Blocks before compliance review or cross-file comparison. Use for qualification, technical, evaluation, commercial, contract, schedule, attachment, and response-material requirements. Do not issue legal conclusions.
 ---
 
-# 采购文件理解
+# 采购要求提取
 
-## 目标
+从当前批次 `blocks` 完整提取原文明示、可核验的采购要求，供后端建立台账；不得进行合规审查。
 
-基于文档结构画像和原始Block，完整提取采购文件中“要求、条件、数值、责任、时限、评分、证明材料及合同约定”的候选原子事项。输出供台账服务去重归并，不直接作合规判断。
+## 提取规则
 
-## 输入前提
+1. 扫描项目日程、资格与实质性条件、技术与验收、评审与评分、报价与付款、合同履约、附件及响应材料，不因分类为空而编造事项。
+2. 一个候选只表达一个主要动作。复合条款、编号子项、不同条件或不同数值分别提取，并保留共同前提、例外、否定词、金额、日期、比例、期限、单位和比较方向。
+3. 只使用原文，不引入法规、常识或审查结论；不把目录、标题、页眉页脚、孤立符号和纯引用提示当作要求。
+4. `statement` 必须是脱离上下文仍完整的独立句。不得输出残句，也不得概括、合并或删除重复、冲突及疑似错误的原文要求。
+5. `evidence_block_ids` 只能使用输入中的真实 `id`；`evidence_quote` 必须是对应 `x` 中的连续原文。无法同时提供有效ID和摘录时不输出。
+6. `r=primary` 是本批主要内容；`r=repeated_context` 仅辅助理解，不得仅凭重复上下文再次生成候选。`structure_context` 不能作为证据，与Block冲突时以Block为准。
+7. 表格按完整业务行提取并保留表头语义。`tf` 只限定当前数据行范围；重复表头不生成候选，证据继续引用原表格Block ID，不引用 `fragment_id`。
+8. `primary_category` 必须来自 `allowed_categories`。不确定强制性时不得把描述性内容升级为必须、否决或无效条件。
 
-必须同时接收：
+## 输出
 
-- 文档角色、批次编号和允许的事项分类；
-- 当前批次局部章节路径和分类提示；
-- 当前章节原始Block及必要的定义、引用目标Block；
-- 每个Block的`block_id`、类型、页码和原文。
-
-不要要求每批重复输入完整目录、全文结构画像或全文附件清单。局部章节上下文与Block不一致时以Block原文为准并记录警告；无法定位原文时拒绝候选事项。
-
-字段定义、枚举和完整示例见[采购候选事项契约](references/procurement-item-contract.md)。
-
-## 七类覆盖范围
-
-1. 项目与日程：项目概况、预算、采购方式、答疑、提交、开标和有效期；
-2. 资格与实质性条件：主体资格、资质、业绩、人员、联合体、禁止性和废标条件；
-3. 技术需求与验收：范围、参数、成果、交付、实施、验收、质保和服务；
-4. 评审办法与评分：评审方法、评分项、分值、评分依据、门槛和证明材料；
-5. 商务报价与付款：最高限价、报价构成、税费、付款、结算和保证金；
-6. 合同履约与责任：合同范本中的权利义务、期限、违约、保密、知识产权和争议；
-7. 附件与引用：响应格式、声明、承诺函、表格、证明材料和跨章节引用。
-
-分类是业务视图标签，不是物理切块。同一候选事项可有多个`category_tags`，但必须有一个`primary_category`。
-
-## 工作流
-
-1. 读取全文结构画像，确定各章节职责、角色同义词、术语和全局约束。
-2. 制定七类覆盖计划，记录每类应扫描的章节、表格和附件；不得只扫描正文段落。
-3. 按完整章节批次处理Block，并为每批携带全局画像、章节路径、相关定义和引用目标。
-4. 把复合条款拆成一个事项一个动作；保留前置条件、例外、否定词、数值、单位和时限。
-5. 提取主体、动作、客体、条件、标准化数值、强制性信号、要求类型和响应材料要求。
-6. 对评分表、技术参数表和报价表按完整业务行提取，始终携带表头、表格ID和章节路径。
-7. 对合同范本中的履约条款建立`contract_link`，但不判断其是否与采购需求一致。
-8. 精确引用原文摘录并保存一个或多个`evidence_block_ids`；无法定位原文的候选直接拒绝。
-9. 标记疑似重复、跨章节关联和潜在冲突供台账服务归并，不自行删除任何一方。
-10. 输出候选事项、七类覆盖报告、拒绝项及未解析引用。
-
-## 原子事项规则
-
-以下句子包含两个事项：
-
-```text
-供应商应在合同签订后30日内完成交付，并提供三年免费质保。
-```
-
-拆成：
-
-```text
-事项1：合同签订后30日内完成交付
-事项2：提供三年免费质保
-```
-
-两个事项可以引用同一个Block，但不得丢失共同条件。遇到“除非”“但”“不含”“不得”“不少于”“最高”等词时必须原样保留其业务方向。
-
-## 强制性标记
-
-- `explicit_mandatory`：原文含必须、应当、须、不得、否决、无效等明确信号；
-- `scoring_related`：影响得分但未明确构成否决；
-- `descriptive`：项目说明、背景或非约束性描述；
-- `uncertain`：仅凭当前上下文无法判断。
-
-不得根据常识把`descriptive`升级为强制要求。
-
-## 硬约束
-
-- 不输出违法、不合理排斥、倾向性或合规等最终审查结论。
-- 不把法规知识写入采购文件原文事实。
-- 不把目录条目当作正文要求，除非正文或附件中存在对应内容。
-- 不删除重复、冲突或疑似错误事项；使用关系字段交给全局校验。
-- 不因未找到附件就断言附件不存在；标记`unresolved_reference`。
-- 不生成没有真实Block和精确摘录的候选事项。
-- 不改写金额、日期、比例、期限、否定词和比较方向。
-
-## 长文档与遗漏复查
-
-第一遍按章节提取候选事项；第二遍按七类覆盖报告检查空白类别、表格、附件、合同范本和未解析引用；第三遍只复查低置信度、潜在冲突和全局约束。完整原文始终保留，批次上下文不得替代全文资产。
-
-## 输出检查
-
-提交结果前确认：
-
-- 每个候选只表达一个主要动作；
-- 每个候选有真实Block和原文摘录；
-- 数值、单位、期限、否定词和例外没有被改写；
-- 七类覆盖报告包含已扫描和待确认范围；
-- 表格事项保留表头语义；
-- 输出不含最终法律或审查结论。
+只输出调用方规定的严格JSON，不附解释、覆盖报告、拒绝项或未解析引用汇总。每项至少包含 `primary_category`、`requirement_type`、`statement`、`evidence_block_ids` 和 `evidence_quote`；其他字段仅在原文明示且非空时输出。没有合格事项时返回空数组。

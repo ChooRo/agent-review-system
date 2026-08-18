@@ -30,4 +30,9 @@ class ToolResult:
     duration_ms: int = 0
 
     def to_dict(self) -> dict[str, Any]:
+        """作用：把工具返回对象转换为可序列化字典。
+        输入：当前 ToolResult 实例。
+        输出：包含全部数据类字段的字典。
+        逻辑：使用 dataclasses.asdict 递归转换数据类字段。
+        """
         return asdict(self)

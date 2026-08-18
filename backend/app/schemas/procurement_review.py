@@ -32,13 +32,19 @@ class OperatorDisposition(BaseModel):
 class PrimaryDecision(BaseModel):
     decision: Literal["receive", "adjust", "reject"]
     comment: str | None = Field(default=None, max_length=2000)
-    risk_level: Literal["high", "medium", "low", "unknown"] | None = None
+    risk_level: Literal["high", "medium", "low", "pending", "unknown"] | None = None
     version: int = Field(ge=1)
 
 
 class CollaborativeComment(BaseModel):
     comment: str = Field(min_length=1, max_length=2000)
     version: int | None = Field(default=None, ge=1)
+
+
+class LegalApplicabilityConfirmation(BaseModel):
+    decision: Literal["confirmed", "rejected", "needs_more_facts"]
+    comment: str | None = Field(default=None, max_length=2000)
+    version: int = Field(ge=1)
 
 
 class DocumentOut(BaseModel):
@@ -61,6 +67,11 @@ class FindingOut(BaseModel):
     description: str
     suggestion: str
     source: dict
+    sources: list[dict] = Field(default_factory=list)
+    finding_type: str | None = None
+    review_scope: str = "finding"
+    evidence_status: str = "evidence_insufficient"
+    evidence_validation: dict = Field(default_factory=dict)
     rule_refs: list[dict] = []
     legal_refs: list[dict] = []
     operator_disposition: dict | None = None
@@ -86,14 +97,24 @@ class TaskOut(BaseModel):
     title: str
     status: str
     document: DocumentOut | None = None
+    document_versions: list[DocumentOut] = Field(default_factory=list)
+    final_baseline: dict | None = None
     finding_summary: dict
-    progress: int = Field(ge=0, le=100)
+    progress: float = Field(ge=0, le=100)
+    progress_step: str | None = None
+    batch_completed: int | None = None
+    batch_total: int | None = None
     task_role: str | None = None
     module_scope: list[str] = []
     quality: dict = Field(default_factory=dict)
     legal_facts: dict = Field(default_factory=dict)
     legal_applicability: list[dict] = Field(default_factory=list)
     legal_context_freeze: list[dict] = Field(default_factory=list)
+    pipeline_status: Literal["completed", "degraded"] | None = None
+    degraded_steps: list[dict] = Field(default_factory=list)
+    system_warnings: list[dict] = Field(default_factory=list)
+    coverage_matrix: list[dict] = Field(default_factory=list)
+    legal_applicability_confirmations: dict[str, dict] = Field(default_factory=dict)
     engine_run_id: str | None = None
     error: str | None = None
     version: int

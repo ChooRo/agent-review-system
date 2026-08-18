@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     storage_backend: str = "json"
     mineru_api_url: str = "http://127.0.0.1:8001"
     mineru_timeout_seconds: int = 900
+    review_task_timeout_seconds: int = 120
     jwt_secret: str = "development-only-secret-change-before-deploy"
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 120

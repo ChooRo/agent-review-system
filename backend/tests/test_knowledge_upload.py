@@ -6,8 +6,8 @@ from fastapi.testclient import TestClient
 from app.core.config import get_settings
 from app.main import app
 from app.repositories.knowledge_repository import KnowledgeRepository
-from app.services import knowledge as knowledge_service_module
-from app.services.knowledge import KnowledgeService
+from app.services.legal import knowledge as knowledge_service_module
+from app.services.legal.knowledge import KnowledgeService
 
 
 def login(client: TestClient, username: str) -> tuple[dict[str, str], dict]:

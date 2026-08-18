@@ -1,5 +1,6 @@
 backend/review_config.json
 runs/
+backend/logs/
 __pycache__/
 *.pyc
 .env

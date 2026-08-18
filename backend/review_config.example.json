@@ -1,21 +1,47 @@
 {
   "mineru": {
     "api_url": "http://127.0.0.1:8001",
-    "timeout_seconds": 900
+    "timeout_seconds": 900,
+    "backend": "pipeline",
+    "effort": "medium",
+    "table_retry_backend": "hybrid-engine",
+    "table_retry_effort": "high"
+  },
+  "ocr": {
+    "api_url": "",
+    "api_key": "",
+    "model": "deepseek-ai/DeepSeek-OCR",
+    "timeout_seconds": 120
   },
   "llm": {
     "api_url": "https://你的OpenAI兼容接口/v1",
     "api_key": "",
     "model": "请填写模型名",
     "timeout_seconds": 120,
-    "max_retries": 0
+    "max_retries": 2
   },
   "rules": {
     "path": null,
     "knowledge_root": "../knowledge/rules"
   },
+  "legal_applicability": {
+    "enabled": true
+  },
   "workflow": {
-    "extract_workers": 3
+    "extract_workers": 2,
+    "model_tokens": 16000,
+    "output_tokens": 3000,
+    "safety_tokens": 1000,
+    "input_overhead_tokens": 9000,
+    "max_request_tokens": 8000,
+    "max_primary_blocks": 25,
+    "max_candidate_estimate": 20,
+    "max_table_rows": 16,
+    "extract_timeout_seconds": 240,
+    "extract_idle_timeout_seconds": 90,
+    "extract_total_timeout_seconds": 240,
+    "extract_max_retries": 1,
+    "extract_stream": true
   },
   "runtime": {
     "runs_root": "../runs",

@@ -3,7 +3,7 @@ from time import sleep
 
 from app.core.config import get_settings
 from app.main import app
-from app.services import procurement_review as review_service
+from app.services.procurement import review as review_service
 
 
 def login(client: TestClient, username: str) -> str:
@@ -21,7 +21,7 @@ def wait_for_terminal(client: TestClient, task_url: str, headers: dict) -> dict:
     raise AssertionError("审查任务未在测试时限内结束")
 
 
-def fake_completed_review(project_id, task_id, _doc_path, store_results, _fail_task, _progress_task, _engine_run_id=None, _task_context=None) -> None:
+def fake_completed_review(project_id, task_id, _doc_path, store_results, _fail_task, _progress_task, _engine_run_id=None, _task_context=None, *_gate_args) -> None:
     store_results(project_id, task_id, {"engine_run_id": "run-test", "quality": {"status": "passed"}, "task_legal_facts": {"project_type": "unknown"}, "legal_applicability": [], "legal_context_freeze": [], "findings": [{"risk_level": "medium", "title": "Test finding", "description": "Review candidate", "recommendation": "Confirm manually", "evidence": []}]})
 
 
@@ -101,4 +101,26 @@ def test_procurement_review_end_to_end_recheck_flow(tmp_path, monkeypatch) -> No
     assert completed["status"] == "completed"
     all_events = client.get(events_url, headers=operator).json()
     assert client.get(f"{events_url}?after={all_events[1]['id']}", headers=operator).json() == all_events[2:]
+    get_settings.cache_clear()
+
+
+def test_rectification_version_and_final_lock(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path)); monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads")); get_settings.cache_clear()
+    client = TestClient(app)
+    operator = {"Authorization": f"Bearer {login(client, 'operator')}"}
+    primary = {"Authorization": f"Bearer {login(client, 'supervisor')}"}
+    project = client.post("/api/v1/projects", headers=operator, json={"name": "rectify", "project_code": "PO-RECTIFY", "handling_department": "procurement", "project_owner": "operator"}).json()
+    task = client.post(f"/api/v1/projects/{project['id']}/procurement-review-tasks", headers=operator, json={"title": "review"}).json()
+    task_url = f"/api/v1/projects/{project['id']}/procurement-review-tasks/{task['id']}"
+    service = review_service.ProcurementReviewService()
+    task_row, tasks = service._task(project["id"], task["id"])
+    original = {"id": "doc-1", "file_name": "v1.pdf", "content_type": "application/pdf", "size": 10, "sha256": "v1", "path": str(tmp_path / "v1.pdf"), "version": 1, "uploaded_by": 1, "uploaded_at": "now"}
+    task_row.update({"status": "completed", "document": original, "document_versions": [original]}); service.tasks.write(tasks)
+    uploaded = client.post(f"{task_url}/rectification-document", headers=operator, files={"file": ("v2.pdf", b"%PDF-1.4\nrectified", "application/pdf")})
+    assert uploaded.status_code == 200
+    assert uploaded.json()["status"] == "rectification_draft" and uploaded.json()["document"]["version"] == 2
+    task_row, tasks = service._task(project["id"], task["id"]); task_row["status"] = "completed"; service.tasks.write(tasks)
+    locked = client.post(f"{task_url}/lock-final", headers=primary)
+    assert locked.status_code == 200
+    assert locked.json()["status"] == "final_locked" and locked.json()["final_baseline"]["document_version"] == 2
     get_settings.cache_clear()

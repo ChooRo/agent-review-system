@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.review_engine.services.workflow import WorkflowEngine, derive_task_legal_facts, match_legal_documents
+from app.review_engine.services.procurement.workflow import WorkflowEngine, derive_task_legal_facts, match_legal_documents
 
 
 def source(key: str) -> dict:
@@ -60,7 +60,7 @@ def test_legal_applicability_statuses_and_frozen_source_are_traceable() -> None:
 
 def test_formal_legal_context_uses_only_applicable_documents(tmp_path: Path) -> None:
     skills = Path(__file__).parents[1] / "app" / "review_engine" / "skills.json"
-    engine = WorkflowEngine(tmp_path / "runs", skills)
+    engine = WorkflowEngine(tmp_path / "runs", skills, {"legal_applicability": {"enabled": True}})
     applicable = legal_document("applicable", PROFILE)
     insufficient = legal_document("insufficient", {"trigger_conditions": [{"value": "依法必须招标项目", "evidence": []}]})
     previous = {
@@ -75,22 +75,65 @@ def test_formal_legal_context_uses_only_applicable_documents(tmp_path: Path) -> 
     assert {item["document_key"]: item["status"] for item in result["decisions"]} == {"applicable": "applicable", "insufficient": "insufficient_facts"}
 
 
-def test_agent_review_receives_only_applicable_legal_units(tmp_path: Path) -> None:
+def test_disabled_gate_treats_all_eligible_laws_as_applicable(tmp_path: Path) -> None:
+    skills = Path(__file__).parents[1] / "app" / "review_engine" / "skills.json"
+    engine = WorkflowEngine(tmp_path / "runs", skills, {"legal_applicability": {"enabled": False}})
+    documents = [legal_document("first", PROFILE), legal_document("second", {})]
+    previous = {
+        "match_rules": {"legal_documents": documents, "warnings": []},
+        "build_ledger": {"ledgers": {"procurement": []}},
+    }
+    engine._previous = lambda _store, step: previous[step]
+    result = engine._match_legal_applicability(None, {}, None, None)
+    assert result["mode"] == "all_eligible_laws"
+    assert result["execution_status"] == "degraded"
+    assert result["degraded_reasons"] == ["legal_applicability_disabled"]
+    assert {item["document_key"] for item in result["decisions"]} == {"first", "second"}
+    assert all(item["status"] == "applicable" for item in result["decisions"])
+
+
+def test_agent_review_only_merges_existing_evidence_candidates(tmp_path: Path) -> None:
     skills = Path(__file__).parents[1] / "app" / "review_engine" / "skills.json"
     engine = WorkflowEngine(tmp_path / "runs", skills)
     captured = {}
 
     class LLM:
-        def json_call(self, _step, _prompt, payload):
+        def json_call(self, _step, prompt, payload):
+            captured["prompt"] = prompt
             captured.update(payload)
-            return {"overall_conclusion": "manual confirmation", "findings": []}
+            return {
+                "overall_conclusion": "发现一项采购文件问题。",
+                "findings": [
+                    {
+                        "title": "模型凭空新增的问题",
+                        "source_candidate_ids": [],
+                    },
+                    {
+                        "title": "采购文件缺少法定内容",
+                        "description": "已提供法规要求列明该内容",
+                        "source_candidate_ids": ["CND-1"],
+                        "evidence_block_ids": ["B-1", "invented-block"],
+                        "legal_unit_ids": ["applicable-unit"],
+                    },
+                ],
+            }
 
     previous = {
-        "build_scene_view": {"topic_views": {}}, "quality_check": {"quality": {}}, "global_validation": {},
         "match_rules": {"rules": [], "matched_count": 0, "rule_source": "test", "warnings": [], "legal_documents": [legal_document("potential", PROFILE)]},
-        "match_legal_applicability": {"applicable_legal_units": [{"legal_unit_id": "applicable-unit"}], "decisions": [{"document_key": "potential", "status": "potential"}]},
+        "match_legal_applicability": {"mode": "applicability_gate", "decisions": [{"document_key": "potential", "status": "applicable"}]},
+        "build_compliance_matrix": {
+            "coverage_matrix": [{"topic": "资格与实质性条件", "coverage_status": "reviewed", "fact_count": 1, "legal_unit_count": 1}],
+            "candidate_findings": [{
+                "candidate_id": "CND-1", "title": "采购文件缺少法定内容", "finding_type": "legal_risk",
+                "evidence_block_ids": ["B-1"], "legal_unit_ids": ["applicable-unit"], "rule_ids": [],
+            }],
+        },
     }
     engine._previous = lambda _store, step: previous[step]
-    engine._agent_review(None, {"scenario": "procurement"}, LLM(), None)
-    assert "legal_documents" not in captured["matched_rules"]
-    assert captured["legal_context"]["applicable_legal_units"] == [{"legal_unit_id": "applicable-unit"}]
+    result = engine._agent_review(None, {"scenario": "procurement"}, LLM(), None)
+    assert "只能去重、合并review_candidates中已有候选" in captured["prompt"]
+    assert captured["legal_context"]["mode"] == "applicability_gate"
+    assert "scene_view" not in captured and "applicable_legal_units" not in captured["legal_context"]
+    assert [item["title"] for item in result["findings"]] == ["采购文件缺少法定内容"]
+    assert result["findings"][0]["evidence_block_ids"] == ["B-1"]
+    assert result["findings"][0]["legal_applicability"] == "applicable"

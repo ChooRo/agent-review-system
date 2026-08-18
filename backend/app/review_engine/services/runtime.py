@@ -7,6 +7,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,20 @@ def write_json(path: Path, value: Any) -> None:
 def read_json(path: Path) -> Any:
     """读取UTF-8 JSON文件。"""
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def configure_logging(level: str = "INFO", log_path: Path | None = None) -> Path:
+    """配置控制台和按大小轮转的应用日志。"""
+    target = (log_path or Path(__file__).resolve().parents[3] / "logs" / "app.log").resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger()
+    logger.setLevel(level.upper())
+    if not any(isinstance(handler, RotatingFileHandler) and Path(handler.baseFilename).resolve() == target for handler in logger.handlers):
+        formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        file_handler = RotatingFileHandler(target, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    return target
 
 
 class RunStore:

@@ -17,6 +17,7 @@ SCOPE_TERMS = (
     "适用", "不适用", "除外", "另有规定", "依照其规定", "本法所称", "本条例所称",
     "范围", "境内", "政府采购", "优先适用", "参照执行",
 )
+REFERENCE_TERMS = ("前款", "前项", "上述", "下列", "依照其规定", "另有规定")
 DATE_RE = re.compile(r"(\d{4})年(\d{1,2})月(\d{1,2})日")
 NUMBER_RE = re.compile(r"(?:中华人民共和国)?(?:国务院|主席|部)?令\s*第\s*([^\s号]{1,12})\s*号")
 SKILL_NAME = "extract-legal-applicability-profile"
@@ -24,7 +25,7 @@ SKILL_NAME = "extract-legal-applicability-profile"
 
 @lru_cache(maxsize=1)
 def load_skill_instructions() -> str:
-    skill_path = Path(__file__).resolve().parents[1] / "skills" / SKILL_NAME / "SKILL.md"
+    skill_path = Path(__file__).resolve().parents[2] / "skills" / SKILL_NAME / "SKILL.md"
     if not skill_path.is_file():
         raise FileNotFoundError(f"legal applicability Skill not found: {skill_path}")
     return skill_path.read_text(encoding="utf-8")
@@ -48,19 +49,32 @@ def prepare_metadata_extraction(knowledge: dict[str, Any], document: dict[str, A
 
 
 def select_candidate_units(units: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Select scope/exception units plus the beginning and end; never send the whole law by default."""
+    """Select scope units with the minimum context needed to resolve references."""
     if not units:
         return []
     articles = sorted({int(unit["article_index"]) for unit in units if unit.get("article_index") is not None})
     edge_articles = set(articles[:3] + articles[-5:])
-    selected = [
-        unit for unit in units
+    matched = {
+        index for index, unit in enumerate(units)
         if unit.get("article_index") in edge_articles
-        or any(term in str(unit.get("search_text") or unit.get("text") or "") for term in SCOPE_TERMS)
-    ]
+        or any(term in clean(unit.get("search_text") or unit.get("text")) for term in SCOPE_TERMS)
+    }
+    contextual = set(matched)
+    for index in matched:
+        text = clean(units[index].get("text"))
+        if any(term in text for term in REFERENCE_TERMS) and index:
+            contextual.add(index - 1)
+    ranked = sorted(
+        contextual,
+        key=lambda index: (
+            index not in matched,
+            not any(term in clean(units[index].get("search_text") or units[index].get("text")) for term in SCOPE_TERMS),
+            index,
+        ),
+    )[:24]
     # Applicability is document-level metadata. Broad procedural terms such as
     # "依法必须" would pull most duties and penalties into this small extraction.
-    return selected[:24]
+    return [units[index] for index in sorted(ranked)]
 
 
 def candidate_batches(units: list[dict[str, Any]], max_units: int = 24, max_chars: int = 8000) -> list[list[dict[str, Any]]]:
@@ -179,8 +193,14 @@ def summarize_applicability(applicability: dict[str, list[dict[str, Any]]]) -> s
         sentences.append(f"关键边界包括{boundaries}")
     if not sentences:
         return "本法规的适用信息尚未从可核验条款中提取完成，请查看展开的法规条文及其证据。"
-    summary = "。".join(sentences) + "。具体适用以展开的法规条文证据为准。"
-    return summary[:160]
+    sentences.append("具体适用以展开的法规条文证据为准")
+    summary = ""
+    for sentence in sentences:
+        candidate = f"{summary}{sentence}。"
+        if len(candidate) > 160:
+            continue
+        summary = candidate
+    return summary or "本法规的适用信息较长，请查看展开的法规条文及其证据。"
 
 
 def validate_item(item: Any, units: dict[str, dict[str, Any]]) -> tuple[dict[str, Any] | None, str]:

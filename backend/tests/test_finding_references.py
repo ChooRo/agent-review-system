@@ -1,5 +1,5 @@
 from app.core.config import get_settings
-from app.services.procurement_review import ProcurementReviewService
+from app.services.procurement.review import ProcurementReviewService
 
 
 def test_legal_evidence_is_not_persisted_as_executable_rule(tmp_path, monkeypatch) -> None:

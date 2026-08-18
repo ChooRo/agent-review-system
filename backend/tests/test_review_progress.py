@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 
 from app.core.config import get_settings
-from app.services import procurement_workflow
-from app.services.procurement_review import ProcurementReviewService
+from app.services.procurement import workflow as procurement_workflow
+from app.services.procurement.review import ProcurementReviewService
 
 
 def empty_state(task: dict) -> dict:
@@ -47,7 +47,7 @@ def test_start_clears_error_and_stage_progress_keeps_run_id(tmp_path, monkeypatc
         def start(self):
             pass
 
-    monkeypatch.setattr("app.services.procurement_review.threading.Thread", Thread)
+    monkeypatch.setattr("app.services.procurement.review.threading.Thread", Thread)
     service.start("project-1", "task-1", {"id": 1, "role_codes": ["operator"], "department": "business"}, None)
     started = service.repository.load()["tasks"][0]
     assert "error" not in started
@@ -60,9 +60,49 @@ def test_start_clears_error_and_stage_progress_keeps_run_id(tmp_path, monkeypatc
     progressed = state["tasks"][0]
     assert progressed["engine_run_id"] == "existing-run"
     assert progressed["progress"] == 11
+    assert progressed["progress_step"] == "parse_documents"
     assert progressed["error"] == "later error"
     assert state["events"][-1]["actor_id"] == 0
     assert "parse_documents" in state["events"][-1]["reason"]
+    get_settings.cache_clear()
+
+
+def test_batch_progress_advances_inside_extract_stage(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    service = ProcurementReviewService()
+    task = {
+        "id": "task-1", "project_id": "project-1", "title": "review", "status": "reviewing",
+        "operator_id": 1, "members": [], "document": None, "progress": 39,
+        "created_at": "now", "updated_at": "now", "version": 1,
+    }
+    service.repository.commit(empty_state(task))
+
+    service._update_review_progress("project-1", "task-1", "run-1", "extract_candidates", 5, 13, 1, 10)
+    first = service.repository.load()["tasks"][0]
+    service._update_review_progress("project-1", "task-1", "run-1", "extract_candidates", 5, 13, 2, 10)
+    second_state = service.repository.load()
+    second = second_state["tasks"][0]
+
+    assert second["progress"] > first["progress"]
+    assert second["batch_completed"] == 2
+    assert second["batch_total"] == 10
+    assert second_state["events"] == []
+    get_settings.cache_clear()
+
+
+def test_stalled_review_is_failed_when_read(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("REVIEW_TASK_TIMEOUT_SECONDS", "60")
+    get_settings.cache_clear()
+    service = ProcurementReviewService()
+    task = {"id": "task-1", "project_id": "project-1", "title": "review", "status": "reviewing", "operator_id": 1, "members": [{"user_id": 1, "task_role": "operator", "module_scope": ["procurement"]}], "document": None, "engine_run_id": "run-1", "progress": 5, "created_at": "2026-01-01T00:00:00+00:00", "updated_at": "2026-01-01T00:00:00+00:00", "version": 1}
+    service.repository.commit(empty_state(task))
+
+    result = service.get_task("project-1", "task-1", {"id": 1, "role_codes": ["operator"], "department": "business"})
+
+    assert result["status"] == "failed"
+    assert "心跳超时" in result["error"]
     get_settings.cache_clear()
 
 
@@ -107,7 +147,7 @@ def test_failed_live_workflow_resumes_existing_run(tmp_path, monkeypatch) -> Non
         lambda *args: progress.append(args),
         run_id,
     )
-    assert progress == [("project-1", "task-1", run_id, None, 1, 13)]
+    assert progress == [("project-1", "task-1", run_id, None, 1, len(procurement_workflow.STEPS) - 2)]
     assert failures[0][-1] == "quality_check: boom"
 
 

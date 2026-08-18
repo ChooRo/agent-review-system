@@ -137,6 +137,7 @@ function openUpload() {
   uploadEffectiveDate.value = ''
   uploadExpiryDate.value = ''
   uploadError.value = ''
+  uploadTask.value = undefined
   showUpload.value = true
 }
 
@@ -180,9 +181,10 @@ async function pollUploadTask(taskId: string) {
     uploadTask.value = await getKnowledgeUploadTask(taskId)
     const task = uploadTask.value
     if (task.status === 'completed' && task.result) {
+      uploadTask.value = { ...task, status: 'storing', progress: 90, message: '正在提取基本信息和适用范围' }
+      await runExtraction(task.result, false)
+      uploadTask.value = { ...task, progress: 100, message: '法规解析和候选提取已完成' }
       showUpload.value = false
-      await loadDocuments()
-      await runExtraction(task.result)
       return
     }
     if (task.status === 'failed') {
@@ -208,16 +210,20 @@ async function retryUpload() {
   }
 }
 
-async function runExtraction(document: KnowledgeListItem) {
+async function runExtraction(document: KnowledgeListItem, expandDocument = true) {
   extractingKey.value = document.document_key
   extractionError.value[document.document_key] = ''
-  expandedDoc.value = document
-  expandedDetail.value = undefined
-  legalUnits.value = []
+  if (expandDocument) {
+    expandedDoc.value = document
+    expandedDetail.value = undefined
+    legalUnits.value = []
+  }
   try {
     const detail = await extractKnowledgeMetadata(document.document_key)
-    expandedDetail.value = detail
-    legalUnits.value = detail.units
+    if (expandDocument) {
+      expandedDetail.value = detail
+      legalUnits.value = detail.units
+    }
     if (detail.metadata_extraction?.status === 'failed') {
       extractionError.value[document.document_key] = extractionWarningText(detail) || '自动提取失败，请稍后重试。'
       notice.value = '法规已入库，但自动提取未完成，可在当前列表重试。'
@@ -229,7 +235,9 @@ async function runExtraction(document: KnowledgeListItem) {
   } catch (reason) {
     extractionError.value[document.document_key] = apiErrorMessage(reason)
     notice.value = '法规已入库，但自动提取未完成，可在当前列表重试。'
-    try { await loadDetail(document) } catch { /* 列表中的真实错误已足够提示 */ }
+    if (expandDocument) {
+      try { await loadDetail(document) } catch { /* 列表中的真实错误已足够提示 */ }
+    }
   } finally {
     extractingKey.value = ''
     await loadDocuments()
@@ -261,7 +269,7 @@ async function openMetadata(document: KnowledgeListItem) {
     metadataRevisionDate.value = metadata.revision_date || ''
     metadataCurrentVersionEffectiveDate.value = metadata.current_version_effective_date || metadata.effective_date || ''
     metadataExpiryDate.value = metadata.expiry_date || ''
-    metadataApplicability.value = structuredClone(metadata.applicability || {})
+    metadataApplicability.value = JSON.parse(JSON.stringify(metadata.applicability || {})) as LegalApplicability
   } catch (reason) {
     metadataError.value = apiErrorMessage(reason)
   } finally {
@@ -507,9 +515,9 @@ onMounted(() => { void loadDocuments() })
     </form>
   </BaseModal>
 
-  <BaseModal v-if="editingDocument" title="维护信息" @close="!savingMetadata && (editingDocument = undefined)">
+  <BaseModal v-if="editingDocument" title="维护信息" wide @close="!savingMetadata && (editingDocument = undefined)">
     <div v-if="metadataLoading" class="state-card">正在加载候选和原文证据…</div>
-    <form v-else-if="editingDetail" @submit.prevent="saveMetadata()">
+    <form v-else-if="editingDetail" class="metadata-editor" @submit.prevent="saveMetadata()">
       <p class="note"><b>Agent 生成候选 → 人工核对编辑 → 确认发布</b><br>{{ editingDocument?.title }} · 原始文件不可覆盖，候选及证据仅在此弹窗内核对和维护。</p>
       <section v-if="editingDetail.metadata_extraction?.status !== 'confirmed'" class="candidate-panel">
         <div class="candidate-head"><div><span class="candidate-kicker">Agent 生成候选</span><h3>{{ candidateDocument?.canonical_title || candidateDocument?.title }}</h3></div><span class="chip extraction-chip" :class="editingDetail.metadata_extraction?.status">{{ extractionLabel(editingDetail.metadata_extraction?.status) }}</span></div>
@@ -618,6 +626,16 @@ onMounted(() => { void loadDocuments() })
 .candidate-edit-row + .candidate-edit-row { margin-top:7px; }
 .candidate-edit-row details { grid-column:1/-1; color:var(--terra); font-size:10px; }
 .candidate-edit-row details p { margin:5px 0; padding:6px 8px; border-left:2px solid var(--terra); background:var(--ivory); color:var(--olive); line-height:1.5; }
+.metadata-editor { display:grid; grid-template-columns:1fr 1fr; gap:0 14px; }
+.metadata-editor > .note,.metadata-editor > .candidate-panel,.metadata-editor > .confirmed-summary,.metadata-editor > .audit-panel,.metadata-editor > .field,.metadata-editor > .edit-scope,.metadata-editor > .upload-error,.metadata-editor > .modal-foot,.metadata-editor > .publish-hint { grid-column:1/-1; }
+.metadata-editor > .note { padding:13px 15px; border:1px solid var(--border); border-radius:10px; background:var(--ivory); line-height:1.65; }
+.metadata-editor .candidate-panel,.metadata-editor .confirmed-summary { margin-bottom:14px; }
+.metadata-editor > .field { padding:12px 14px; margin-bottom:10px; border:1px solid var(--border); border-radius:10px; background:var(--white); }
+.metadata-editor > .upload-grid { margin-bottom:10px; padding:12px 14px 0; border:1px solid var(--border); border-radius:10px; background:var(--white); }
+.metadata-editor .field label { display:flex; align-items:center; justify-content:space-between; gap:8px; font-weight:700; }
+.metadata-editor .field label small { font-weight:400; }
+.metadata-editor .edit-scope { margin-top:4px; padding:15px; border:1px solid var(--border); border-radius:10px; background:var(--ivory); }
+.metadata-editor .modal-foot { position:sticky; bottom:-20px; z-index:3; margin:12px -20px -20px; background:rgba(255,255,255,.96); box-shadow:0 -8px 18px rgba(35,40,36,.06); backdrop-filter:blur(8px); }
 .rule-heading { display:flex; align-items:center; gap:8px; min-width:0; }
 .rule-heading strong { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; color:var(--ink); }
 .rd { margin:9px 0; line-height:1.75; }
@@ -627,5 +645,5 @@ onMounted(() => { void loadDocuments() })
 .unavailable p { max-width:470px; margin:7px auto 0; line-height:1.75; }
 .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
 @media (max-width:800px) { .metadata-grid, .scope-groups { grid-template-columns:1fr; } }
-@media (max-width:680px) { .knowledge-toolbar, .knowledge-stats { align-items:flex-start; flex-direction:column; gap:7px; } .upload-grid { grid-template-columns:1fr; } .doc-layer-file { align-items:flex-start; flex-wrap:wrap; } }
+@media (max-width:680px) { .knowledge-toolbar, .knowledge-stats { align-items:flex-start; flex-direction:column; gap:7px; } .upload-grid,.metadata-editor { grid-template-columns:1fr; } .doc-layer-file { align-items:flex-start; flex-wrap:wrap; } }
 </style>
