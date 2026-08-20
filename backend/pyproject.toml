@@ -10,6 +10,10 @@ dependencies = [
   "pyjwt>=2.10,<3",
   "python-multipart>=0.0.20,<1",
   "uvicorn[standard]>=0.35,<1",
+  "psycopg[binary]>=3.2,<4",
+  "psycopg-pool>=3.2,<4",
+  "sqlalchemy>=2.0,<3",
+  "alembic>=1.13,<2",
 ]
 
 [dependency-groups]

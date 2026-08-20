@@ -3,6 +3,7 @@
 from typing import Any
 
 from ..schemas import ToolContext
+from ...services.legal.retrieval import retrieve_legal_units
 
 
 def search_rules(
@@ -51,20 +52,7 @@ def search_legal_units(
     """
     if not 1 <= top_k <= 100:
         raise ValueError("top_k 必须在 1..100")
-    terms = [term for term in [*query.split(), *(keywords or [])] if term] or [query]
-    ranked = []
-    for unit in units:
-        if article_no and unit.get("article_no") != article_no:
-            continue
-        if unit.get("status") == "repealed":
-            continue
-        if effective_date and unit.get("effective_date") and unit["effective_date"] > effective_date:
-            continue
-        text = str(unit.get("search_text") or unit.get("text") or "")
-        score = sum(text.count(term) for term in terms if term)
-        if score or article_no:
-            ranked.append((score, unit))
-    ranked.sort(key=lambda pair: (pair[0], -int(pair[1].get("paragraph_no") or 0)), reverse=True)
-    selected = [{**unit, "retrieval_score": score} for score, unit in ranked[:top_k]]
-    warnings = ["候选法规中存在效力状态未确认的单元"] if any(unit.get("status") == "unknown" for unit in selected) else []
-    return {"units": selected, "total_candidates": len(ranked), "warnings": warnings}
+    return retrieve_legal_units(
+        units=units, query=query, keywords=keywords, article_no=article_no,
+        effective_date=effective_date, top_k=top_k,
+    )

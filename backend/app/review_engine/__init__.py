@@ -1,1 +1,1 @@
-"""Migrated procurement-review engine implementation."""
+"""迁移后的采购审查引擎实现。"""

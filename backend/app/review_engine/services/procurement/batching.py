@@ -1,4 +1,4 @@
-"""Logical-unit reconstruction and review-batch contracts."""
+"""逻辑单元重建与审查批次契约。"""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ TOC_LINE = re.compile(r"(?:\.{2,}|…{2,}).*\d+\s*$")
 
 
 def token_estimate(text: str) -> int:
-    """Conservative mixed Chinese/Latin token estimate without a tokenizer dependency."""
+    """不依赖分词器的保守中英文混合令牌估算。"""
     chinese = len(re.findall(r"[\u4e00-\u9fff]", text))
     other = max(len(text) - chinese, 0)
     return chinese + (other + 3) // 4
@@ -49,7 +49,7 @@ def table_business_row_count(block: dict[str, Any]) -> int:
 
 
 def candidate_estimate(block: dict[str, Any]) -> float:
-    """Estimate output density before calling the model; context never consumes candidate budget."""
+    """调用模型前估算输出密度；上下文不会占用候选项预算。"""
     if block.get("role") not in {None, "primary"}:
         return 0.0
     block_type = str(block.get("type") or block.get("block_type") or "")
@@ -70,7 +70,7 @@ def candidate_estimate(block: dict[str, Any]) -> float:
 
 
 class _TableHTMLParser(HTMLParser):
-    """Extract complete text rows from MinerU table HTML without extra dependencies."""
+    """无需额外依赖，从 MinerU 表格 HTML 中提取完整文本行。"""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -97,7 +97,7 @@ class _TableHTMLParser(HTMLParser):
                 self.malformed = True
                 self._cell_span = (1, 1)
             self._header = self._header or tag == "th"
-        elif tag == "br" and self._cell is not None:
+        elif tag in {"br", "p", "div", "li"} and self._cell is not None and self._cell:
             self._cell.append("\n")
 
     def handle_data(self, data: str) -> None:
@@ -107,19 +107,27 @@ class _TableHTMLParser(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
         if tag in {"td", "th"} and self._row is not None and self._cell is not None:
-            self._row.append({"text": " ".join("".join(self._cell).split()), "rowspan": self._cell_span[0], "colspan": self._cell_span[1]})
+            lines = [" ".join(line.split()) for line in "".join(self._cell).splitlines()]
+            self._row.append({
+                "text": "\n".join(line for line in lines if line),
+                "rowspan": self._cell_span[0],
+                "colspan": self._cell_span[1],
+            })
             self._cell = None
         elif tag == "tr" and self._row is not None:
             cells: dict[int, str] = {column: value for column, (_, value) in self._rowspans.items()}
+            inherited_columns = sorted(cells)
             self._rowspans = {
                 column: (remaining - 1, value)
                 for column, (remaining, value) in self._rowspans.items()
                 if remaining > 1
             }
             column = 0
+            spans: list[dict[str, int]] = []
             for cell in self._row:
                 while column in cells:
                     column += 1
+                spans.append({"col": column, "rowspan": cell["rowspan"], "colspan": cell["colspan"]})
                 for offset in range(cell["colspan"]):
                     value = cell["text"] if offset == 0 else ""
                     cells[column + offset] = value
@@ -128,14 +136,22 @@ class _TableHTMLParser(HTMLParser):
                 column += cell["colspan"]
             expanded = [cells.get(index, "") for index in range(max(cells, default=-1) + 1)]
             if any(expanded):
-                self.rows.append({"cells": expanded, "is_header": self._header})
+                self.rows.append({
+                    "cells": expanded,
+                    "is_header": self._header,
+                    "inherited_columns": inherited_columns,
+                    "spans": spans,
+                })
             self._row = None
 
 
 def table_rows(block: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return complete MinerU HTML rows; never guess rows from flattened table text."""
+    """返回完整的 MinerU HTML 行；绝不根据扁平化表格文本猜测行。"""
     source = block.get("source") or {}
     html = str(source.get("table_html") or "") if isinstance(source, dict) else ""
+    text = str(block.get("text") or "").strip()
+    if not html and text.lower().startswith("<table"):
+        html = text
     if not html:
         return []
     parser = _TableHTMLParser()
@@ -150,8 +166,11 @@ def table_rows(block: dict[str, Any]) -> list[dict[str, Any]]:
     if not rows:
         return []
     widths = {len(row["cells"]) for row in rows}
-    if len(widths) != 1:
-        return []
+    # 对于左侧列由跨行单元格继承的续行，MinerU 可能省略末尾空单元格。
+    # 保留已知的表格网格宽度，不要因此丢弃整张表；这里不会臆造单元格文本。
+    width = max(widths)
+    for row in rows:
+        row["cells"].extend([""] * (width - len(row["cells"])))
     if not any(row["is_header"] for row in rows):
         first = [cell for cell in rows[0]["cells"] if cell]
         header_words = ("条款", "名称", "内容", "序号", "项目", "要求", "评分", "分值", "参数")
@@ -168,8 +187,60 @@ def table_rows(block: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def table_business_view(block: dict[str, Any]) -> dict[str, Any] | None:
+    """在保留行列来源信息的同时，构建供 AI 使用的紧凑记录。"""
+    return table_business_view_from_rows(block, table_rows(block))
+
+
+def table_business_view_from_rows(
+    block: dict[str, Any], rows: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """根据已校验的行构建相同视图，使片段保留来源信息。"""
+    headers = [row for row in rows if row.get("is_header")]
+    records = [row for row in rows if not row.get("is_header")]
+    if not headers or not records:
+        return None
+    width = len(rows[0]["cells"])
+    columns: list[str] = []
+    used: dict[str, int] = {}
+    for column in range(width):
+        parts: list[str] = []
+        for row in headers:
+            value = str(row["cells"][column] or "").strip()
+            if value and value not in parts:
+                parts.append(value)
+        base = " / ".join(parts) or f"第{column + 1}列"
+        used[base] = used.get(base, 0) + 1
+        columns.append(base if used[base] == 1 else f"{base}_{used[base]}")
+    has_spans = any(
+        cell.get("rowspan", 1) > 1 or cell.get("colspan", 1) > 1
+        for row in rows for cell in row.get("spans", [])
+    )
+    confidence = 0.8 if has_spans else 0.95
+    return {
+        "source": {
+            "block_id": block.get("block_id"),
+            "page": block.get("page_no") or block.get("page"),
+        },
+        "columns": columns,
+        "records": [
+            {
+                "row": row["row_index"],
+                "values": {columns[index]: value for index, value in enumerate(row["cells"])},
+                **({"inherited_columns": row["inherited_columns"]} if row.get("inherited_columns") else {}),
+                **({"spans": [cell for cell in row.get("spans", [])
+                               if cell.get("rowspan", 1) > 1 or cell.get("colspan", 1) > 1]}
+                   if any(cell.get("rowspan", 1) > 1 or cell.get("colspan", 1) > 1
+                          for cell in row.get("spans", [])) else {}),
+            }
+            for row in records
+        ],
+        "structure_confidence": confidence,
+    }
+
+
 def table_structure_status(block: dict[str, Any]) -> str:
-    """Classify table input without pretending dense flattened text is structured."""
+    """对表格输入进行分类，不把密集的扁平文本冒充为结构化内容。"""
     source = block.get("source") or {}
     html = str(source.get("table_html") or "") if isinstance(source, dict) else ""
     text = str(block.get("text") or "").strip()
@@ -186,7 +257,8 @@ def table_structure_status(block: dict[str, Any]) -> str:
 
 def rows_html(headers: list[dict[str, Any]], rows: list[dict[str, Any]]) -> str:
     def render(row: dict[str, Any], tag: str) -> str:
-        return "<tr>" + "".join(f"<{tag}>{html_lib.escape(str(cell))}</{tag}>" for cell in row["cells"]) + "</tr>"
+        cells = (html_lib.escape(str(cell)).replace("\n", "<br>") for cell in row["cells"])
+        return "<tr>" + "".join(f"<{tag}>{cell}</{tag}>" for cell in cells) + "</tr>"
     return "<table>" + "".join(render(row, "th") for row in headers) + "".join(render(row, "td") for row in rows) + "</table>"
 
 
@@ -206,12 +278,12 @@ class BatchBudget:
 
     @property
     def max_table_rows(self) -> int:
-        # A full procurement candidate commonly costs roughly 150-200 output tokens.
+        # 一个完整的采购候选项通常约占 150-200 个输出令牌。
         return max(1, min(self.table_row_limit, self.output_tokens // 180))
 
 
 class LogicalUnitBuilder:
-    """Build deterministic units in source order; numbering is only a boundary hint."""
+    """按来源顺序构建确定性单元；编号仅作为边界提示。"""
 
     def build(self, document: dict[str, Any]) -> dict[str, Any]:
         source_blocks = list(document.get("blocks", []))
@@ -230,7 +302,14 @@ class LogicalUnitBuilder:
             heading_level = self._heading_level(block)
             if is_attachment_heading:
                 attachment_level = heading_level
-            elif is_heading and attachment_level is not None and heading_level <= attachment_level:
+            elif (
+                is_heading
+                and attachment_level is not None
+                and (
+                    heading_level < attachment_level
+                    or (heading_level == attachment_level and not CLAUSE.match(text))
+                )
+            ):
                 attachment_level = None
             in_attachment = attachment_level is not None
             unit_type = self._unit_type(block, in_attachment, current)
@@ -324,6 +403,8 @@ class LogicalUnitBuilder:
         source = block.get("source") or {}
         if block.get("block_type") == "table" and isinstance(source, dict) and source.get("table_html"):
             entry["table_html"] = source["table_html"]
+        elif block.get("block_type") == "table" and text.strip().lower().startswith("<table"):
+            entry["table_html"] = text
         if marker:
             entry["numbering_text"] = marker.group(0)
         return entry
@@ -439,7 +520,7 @@ class LogicalUnitBuilder:
 
 
 class BatchAssembler:
-    """Pack complete logical units within a model input budget."""
+    """在模型输入预算内装入完整的逻辑单元。"""
 
     def __init__(self, budget: BatchBudget | None = None):
         self.budget = budget or BatchBudget()
@@ -542,7 +623,7 @@ class BatchAssembler:
         }
 
     def _split_oversized(self, unit: dict[str, Any], start: int) -> list[dict[str, Any]]:
-        """Split only at Block boundaries; an indivisible oversized Block is a hard validation error."""
+        """只在 Block 边界拆分；无法拆分的超大 Block 属于硬校验错误。"""
         if unit.get("unit_type") == "table_unit":
             table_batches = self._split_table_unit(unit, start)
             if table_batches:
@@ -563,7 +644,7 @@ class BatchAssembler:
         return result
 
     def _split_table_unit(self, unit: dict[str, Any], start: int) -> list[dict[str, Any]]:
-        """Split one oversized MinerU Table Block by complete HTML rows and repeat its header."""
+        """按完整 HTML 行拆分超大的 MinerU 表格 Block，并重复表头。"""
         table_blocks = [
             block for block in unit.get("blocks", [])
             if block.get("role") == "primary" and block.get("type") == "table"
@@ -613,6 +694,7 @@ class BatchAssembler:
                 **table_block,
                 "text": fragment_text,
                 "table_html": rows_html(headers, group),
+                "table_business": table_business_view_from_rows(table_block, [*headers, *group]),
                 "table_fragment": {
                     "fragment_id": f"TF-{unit['unit_id']}-{index:03d}",
                     "fragment_no": index,
@@ -673,13 +755,14 @@ class BatchAssembler:
         rows: list[dict[str, Any]],
         start: int,
     ) -> list[dict[str, Any]]:
-        """Split a reconstructed cross-page table while preserving every source Block ID."""
+        """拆分重建后的跨页表格，同时保留每个来源 Block ID。"""
         context = [dict(block) for block in unit.get("blocks", []) if block.get("role") != "primary"]
         auxiliary = [
             dict(block) for block in unit.get("blocks", [])
             if block.get("role") == "primary" and block.get("type") != "table"
         ]
         batches: list[dict[str, Any]] = []
+        previous_tail: list[dict[str, Any]] = []
         for table_index, table_block in enumerate(table_blocks):
             block_rows = [row for row in rows if row.get("block_id") == table_block["block_id"]]
             if not block_rows or not any(row.get("is_header") for row in block_rows):
@@ -688,6 +771,21 @@ class BatchAssembler:
                 {**block, "role": "repeated_context" if table_index or batches else block["role"]}
                 for block in context
             ]
+            if previous_tail:
+                previous_headers = [row for row in rows if row.get("block_id") == table_blocks[table_index - 1]["block_id"] and row.get("is_header")]
+                continuation = {
+                    **table_blocks[table_index - 1],
+                    "role": "repeated_context",
+                    "text": "跨页续表上下文：\n" + "\n".join(row["text"] for row in previous_tail),
+                    "table_html": rows_html(previous_headers, previous_tail),
+                    "table_fragment": {
+                        "continuation_context": True,
+                        "source_block_id": table_blocks[table_index - 1]["block_id"],
+                        "row_start": previous_tail[0]["row_index"],
+                        "row_end": previous_tail[-1]["row_index"],
+                    },
+                }
+                repeated_context.append(continuation)
             subunit = {
                 **unit,
                 "blocks": [*repeated_context, table_block],
@@ -705,6 +803,7 @@ class BatchAssembler:
                             f"TF-{unit['unit_id']}-{table_index + 1:03d}-{int(fragment.get('fragment_no') or 1):03d}"
                         )
             batches.extend(pieces)
+            previous_tail = [row for row in block_rows if not row.get("is_header")][-2:]
         if auxiliary:
             last_table = table_blocks[-1]
             last_headers = [
@@ -729,7 +828,7 @@ class BatchAssembler:
 
 
 class BatchValidator:
-    """Enforce coverage, evidence identity, attachment boundaries and token limits."""
+    """校验覆盖范围、证据身份、附件边界和令牌限制。"""
 
     def validate(self, logical: dict[str, Any], batches: dict[str, Any]) -> dict[str, Any]:
         issues: list[dict[str, Any]] = []

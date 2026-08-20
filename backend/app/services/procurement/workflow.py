@@ -1,4 +1,4 @@
-"""Run the real procurement review workflow in a backend thread."""
+"""在后端线程中运行实际的采购审查工作流。"""
 
 from pathlib import Path
 from typing import Callable

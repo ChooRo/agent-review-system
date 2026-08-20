@@ -1,4 +1,4 @@
-"""Independent evidence-content validation for review findings."""
+"""审查问题的独立证据内容校验。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ TITLE_STOP_WORDS = {"条款", "问题", "异常", "可能", "逻辑", "解析", 
 
 
 def chinese_support_terms(title: str) -> list[str]:
-    """Extract short Chinese terms instead of comparing the whole title as one token."""
+    """提取简短中文术语，而不是把完整标题作为一个令牌比较。"""
     chunks = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9.%]+", title)
     terms: list[str] = []
     for chunk in chunks:
@@ -23,18 +23,18 @@ def chinese_support_terms(title: str) -> list[str]:
 
 
 def plain_evidence_text(value: Any) -> str:
-    """Turn stored HTML/Markdown-ish evidence into readable source text."""
+    """将存储的 HTML 或类 Markdown 证据转换为可读的来源文本。"""
     without_tags = re.sub(r"<[^>]+>", " ", html.unescape(str(value or "")))
     return re.sub(r"\s+", " ", without_tags).strip()
 
 
 def canonical_evidence_text(value: Any) -> str:
-    """Use one representation for model quotes and stored HTML table blocks."""
+    """为模型引文和存储的 HTML 表格 Block 使用统一表示。"""
     return re.sub(r"[\W_]+", "", plain_evidence_text(value).lower(), flags=re.UNICODE)
 
 
 class EvidenceValidationService:
-    """Validate identity, location, quotes, rule state and conclusion support signals."""
+    """校验身份、位置、引文、规则状态和结论支持信号。"""
 
     def validate(
         self,

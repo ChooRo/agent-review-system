@@ -65,6 +65,7 @@ class MinerUService:
             document = adapt_content_list(raw, source.stem, role)
             resolve_image_refs(document, content_list.parent, output_dir / "mineru")
             self._supplement_images(document)
+            self._supplement_missing_pdf_pages(document, source)
         document["document_role"] = role
         document["source_file"] = str(source)
         parser = document.setdefault("parser", {})
@@ -77,7 +78,7 @@ class MinerUService:
         return document
 
     def _supplement_images(self, document: dict[str, Any]) -> None:
-        """Use an optional OpenAI-compatible DeepSeek-OCR server for empty image blocks."""
+        """对空图片 Block 使用可选的 OpenAI 兼容 DeepSeek-OCR 服务。"""
         api_url = str(self.ocr_config.get("api_url") or "").rstrip("/")
         model = str(self.ocr_config.get("model") or "")
         if not api_url or not model:
@@ -103,8 +104,13 @@ class MinerUService:
                 ]}],
             }
             try:
-                with httpx.Client(timeout=timeout, trust_env=False) as client:
-                    response = client.post(f"{api_url}/chat/completions", headers=headers, json=payload)
+                response = None
+                for attempt in range(2):
+                    with httpx.Client(timeout=timeout, trust_env=False) as client:
+                        response = client.post(f"{api_url}/chat/completions", headers=headers, json=payload)
+                    if response.status_code not in {429, 500, 502, 503, 504} or attempt == 1:
+                        break
+                assert response is not None
                 response.raise_for_status()
                 content = response.json().get("choices", [{}])[0].get("message", {}).get("content", "")
                 if isinstance(content, list):
@@ -118,8 +124,79 @@ class MinerUService:
                 source["ocr_raw_text"] = raw_text
                 source["ocr_provider"] = "deepseek_ocr"
                 source["ocr_model"] = model
+            except httpx.HTTPStatusError as exc:
+                source["ocr_error"] = type(exc).__name__
+                source["ocr_status_code"] = exc.response.status_code
+                source["ocr_error_detail"] = exc.response.text[:500]
             except Exception as exc:
                 source["ocr_error"] = type(exc).__name__
+
+    def _supplement_missing_pdf_pages(self, document: dict[str, Any], source_file: Path) -> None:
+        """当版面解析器丢失原本可读的页面时，保留 PDF 原生文本。"""
+        self.supplement_native_pdf_pages(document, source_file, only_missing=True)
+
+    def supplement_native_pdf_pages(
+        self,
+        document: dict[str, Any],
+        source_file: Path,
+        page_numbers: set[int] | None = None,
+        *,
+        only_missing: bool = False,
+        reason: str = "missing_page_content",
+    ) -> None:
+        """将 PDF 原生文本层作为明确的非结构化兜底内容附加到文档中。"""
+        if source_file.suffix.lower() != ".pdf":
+            return
+        pages = self._native_pdf_pages(source_file)
+        if not pages:
+            return
+        blocks = document.get("blocks", [])
+        content_pages = {
+            int(block.get("page_no") or 0)
+            for block in blocks
+            if block.get("block_type") not in {"header", "footer", "page_number", "noise"}
+            and str(block.get("text") or "").strip()
+        }
+        existing_fallback_pages = {
+            int(block.get("page_no") or 0)
+            for block in blocks
+            if (block.get("source") or {}).get("parser_fallback") == "native_pdf_text"
+        }
+        for page_no, text in enumerate(pages, start=1):
+            text = text.strip()
+            if page_numbers is not None and page_no not in page_numbers:
+                continue
+            if page_no in existing_fallback_pages or (only_missing and page_no in content_pages) or len(text) < 40:
+                continue
+            blocks.append({
+                "block_id": f"NATIVE-P{page_no:04d}",
+                "block_type": "paragraph",
+                "heading_path": [],
+                "text": text,
+                "page_no": page_no,
+                "bbox": None,
+                "reading_order": len(blocks) + 1,
+                "heading_level": None,
+                "source": {
+                    "parser_fallback": "native_pdf_text",
+                    "fallback_reason": reason,
+                },
+            })
+
+    @staticmethod
+    def _native_pdf_pages(source_file: Path) -> list[str]:
+        """如果可用则使用 Poppler 提取 PDF 文本层；没有它时解析仍可工作。"""
+        extractor = shutil.which("pdftotext")
+        if not extractor:
+            return []
+        try:
+            result = subprocess.run(
+                [extractor, "-layout", "-enc", "UTF-8", str(source_file), "-"],
+                check=True, capture_output=True, text=True, encoding="utf-8", timeout=120,
+            )
+        except (OSError, subprocess.SubprocessError, UnicodeError):
+            return []
+        return result.stdout.split("\f")[:-1] if result.stdout.endswith("\f") else result.stdout.split("\f")
 
     def _prepare_source(self, source: Path, output_dir: Path) -> Path:
         """MinerU支持的PDF、DOCX和图片直接返回；旧DOC先转为固定版式PDF。"""
@@ -166,8 +243,7 @@ class MinerUService:
         if end_page_id is not None:
             fields["end_page_id"] = str(end_page_id)
         mime = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
-        # MinerU is a local service. Do not let workstation proxy variables route
-        # its IPv6 loopback request through a gateway.
+        # MinerU 是本地服务，不要让工作站代理变量把 IPv6 回环请求转发到网关。
         with source.open("rb") as handle, httpx.Client(timeout=self.timeout_seconds, trust_env=False) as client:
             multipart = [(name, (None, value)) for name, value in fields.items()]
             multipart.append(("files", (source.name, handle, mime)))
@@ -257,7 +333,7 @@ def namespace_block_ids(document: dict[str, Any], role: str) -> None:
 
 
 def resolve_image_refs(document: dict[str, Any], content_root: Path, extract_root: Path) -> None:
-    """Resolve MinerU relative image paths so optional OCR can read them safely."""
+    """解析 MinerU 的相对图片路径，使可选 OCR 能够安全读取图片。"""
     safe_root = extract_root.resolve()
     for block in document.get("blocks", []):
         source = block.setdefault("source", {})

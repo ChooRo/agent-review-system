@@ -1,4 +1,4 @@
-"""Common account-role predicates."""
+"""通用账户角色谓词。"""
 
 from typing import Any
 

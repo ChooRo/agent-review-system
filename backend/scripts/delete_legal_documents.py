@@ -1,4 +1,4 @@
-"""Safely delete explicitly selected uploaded legal-document directories."""
+"""安全删除明确选定的已上传法律文档目录。"""
 
 from __future__ import annotations
 

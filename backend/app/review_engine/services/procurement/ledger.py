@@ -1,4 +1,4 @@
-"""Lossless procurement assertion ledger and business-item clustering."""
+"""无损采购断言台账和业务事项聚类。"""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ DIMENSION_TERMS = {
 
 
 def value_dimension(item: dict[str, Any]) -> str:
-    """Infer a conservative comparison dimension without overwriting source values."""
+    """推断保守的比较维度，不覆盖来源值。"""
     normalized = item.get("normalized_value")
     unit = normalize_text(normalized.get("unit")) if isinstance(normalized, dict) else ""
     if unit in {"cny", "rmb", "元", "万元"}:
@@ -49,7 +49,7 @@ def value_dimension(item: dict[str, Any]) -> str:
 
 
 class LedgerService:
-    """Preserve extraction occurrences and source assertions before clustering."""
+    """在聚类前保留提取出现记录和来源断言。"""
 
     def build(self, role: str, candidates: list[dict[str, Any]], document_version_id: str) -> dict[str, Any]:
         occurrences: list[dict[str, Any]] = []
@@ -156,7 +156,7 @@ class LedgerService:
 
 
 class SceneViewService:
-    """Build category views without destroying assertion-level provenance."""
+    """构建分类视图，不破坏断言级来源信息。"""
 
     def build(self, ledger: dict[str, Any]) -> dict[str, Any]:
         assertions = {item["assertion_id"]: item for item in ledger.get("source_assertions", [])}
@@ -164,3 +164,10 @@ class SceneViewService:
         for cluster in ledger.get("business_item_clusters", []):
             topic_views[cluster["category"]].append({**cluster, "assertions": [assertions[item_id] for item_id in cluster["assertion_ids"] if item_id in assertions]})
         return {"scenario": "procurement", "topic_views": dict(topic_views)}
+
+
+def procurement_assertions(value: Any) -> list[dict[str, Any]]:
+    """读取当前三层台账和旧版扁平检查点产物。"""
+    if isinstance(value, list):
+        return value
+    return value.get("source_assertions", []) if isinstance(value, dict) else []

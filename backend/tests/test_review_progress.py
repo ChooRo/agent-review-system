@@ -7,7 +7,10 @@ from app.services.procurement.review import ProcurementReviewService
 
 def empty_state(task: dict) -> dict:
     return {
-        "projects": [{"id": "project-1", "name": "project", "project_code": "P-1"}],
+        "projects": [{"id": "project-1", "name": "project", "project_code": "P-1", "handling_department": "procurement",
+                      "project_owner": "经办", "status": "draft", "created_by": 1,
+                      "created_at": "2026-01-01T00:00:00+00:00", "updated_at": "2026-01-01T00:00:00+00:00",
+                      "version": 1}],
         "tasks": [task],
         "findings": [],
         "comments": [],
@@ -28,7 +31,9 @@ def test_start_clears_error_and_stage_progress_keeps_run_id(tmp_path, monkeypatc
         "status": "failed",
         "operator_id": 1,
         "members": [],
-        "document": {"path": str(tmp_path / "document.pdf")},
+        "document": {"id": "doc-1", "file_name": "document.pdf", "content_type": "application/pdf", "size": 10,
+                     "sha256": "doc1", "path": str(tmp_path / "document.pdf"), "version": 1, "uploaded_by": 1,
+                     "uploaded_at": "2026-01-01T00:00:00+00:00"},
         "engine_run_id": "existing-run",
         "error": "old error",
         "progress": 35,
@@ -96,7 +101,7 @@ def test_stalled_review_is_failed_when_read(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("REVIEW_TASK_TIMEOUT_SECONDS", "60")
     get_settings.cache_clear()
     service = ProcurementReviewService()
-    task = {"id": "task-1", "project_id": "project-1", "title": "review", "status": "reviewing", "operator_id": 1, "members": [{"user_id": 1, "task_role": "operator", "module_scope": ["procurement"]}], "document": None, "engine_run_id": "run-1", "progress": 5, "created_at": "2026-01-01T00:00:00+00:00", "updated_at": "2026-01-01T00:00:00+00:00", "version": 1}
+    task = {"id": "task-1", "project_id": "project-1", "title": "review", "status": "reviewing", "operator_id": 1, "members": [{"user_id": 1, "task_role": "operator", "department": "采购业务部", "module_scope": ["procurement"]}], "document": None, "engine_run_id": "run-1", "progress": 5, "created_at": "2026-01-01T00:00:00+00:00", "updated_at": "2026-01-01T00:00:00+00:00", "version": 1}
     service.repository.commit(empty_state(task))
 
     result = service.get_task("project-1", "task-1", {"id": 1, "role_codes": ["operator"], "department": "business"})

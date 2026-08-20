@@ -1,4 +1,4 @@
-/* Review workbench: mapped from the final effective Demo declarations. */
+ /* Review workbench: mapped from the final effective Demo declarations. */
 :root{--mono:SFMono-Regular,Consolas,monospace}
 .wb{display:grid;grid-template-columns:minmax(300px,1.02fr) minmax(430px,1.4fr) minmax(280px,.88fr);gap:12px;align-items:stretch;height:clamp(420px,calc(100vh - 250px),680px)}
 .wb .wcol{min-height:0;height:100%;background:var(--ivory);border:1px solid var(--border2);border-radius:12px;overflow:hidden;box-shadow:none;display:flex;flex-direction:column;max-height:none}
@@ -23,7 +23,7 @@
 .wb .clause-table-html :is(th,.clause-table-html td){padding:9px 10px;vertical-align:top;text-align:left;border-right:1px solid var(--border2);border-bottom:1px solid var(--border2);word-break:break-word;overflow-wrap:anywhere;white-space:pre-wrap}
 .wb .clause-table-html :is(th,.clause-table-html td):last-child{border-right:0}
 .wb .clause-table-html :is(tr:last-child td){border-bottom:0}
-.wb .clause-table-html :is(th){font-weight:700;color:var(--ink);background:var(--parchment);white-space:nowrap}
+.wb .clause-table-html :is(th){position:sticky;top:0;z-index:2;font-weight:700;color:var(--ink);background:var(--parchment);white-space:nowrap}
 .wb .clause-table-html :is(tr:nth-child(even) td){background:#fcfbf7}
 .wb .clause-table-html :is(tr:hover td){background:var(--terra-soft)}
 .wb .clause-table{width:100%;border-collapse:separate;border-spacing:0;table-layout:auto;font-size:12px;line-height:1.65;color:var(--ink2);background:var(--white);overflow:hidden;border:1px solid var(--border2);border-radius:7px}

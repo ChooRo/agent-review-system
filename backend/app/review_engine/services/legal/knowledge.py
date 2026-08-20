@@ -97,8 +97,8 @@ def parse_docx(source: Path) -> dict[str, Any]:
 
 def build_legal_knowledge(document: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
     """把顺序Block重组为带父级上下文和证据映射的条、款、项单元。"""
-    # The upload form title is a label, not authoritative legal metadata.
-    # Always derive the display/document title from the parsed legal text.
+    # 上传表单标题只是标签，不是权威的法律元数据。
+    # 始终根据解析后的法律文本生成展示标题和文档标题。
     title = infer_title(document)
     document_key = hashlib.sha1(title.encode("utf-8")).hexdigest()[:10]
     units: list[dict[str, Any]] = []

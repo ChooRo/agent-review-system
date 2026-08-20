@@ -1,1 +1,1 @@
-"""Legal-document processing services."""
+"""法律文档处理服务。"""

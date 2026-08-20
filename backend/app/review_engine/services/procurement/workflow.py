@@ -12,18 +12,35 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
 
-from ..llm import LLMService
+from ..llm import LLMService, OutputLengthExceeded, JsonGuardAbort
 from ..mineru import MinerUService
 from ..runtime import RunStore, read_json, write_json
-from ..topics import canonical_topic, dictionary_topics, topic_keys
 from ...tools.legal.rules import search_rules
 from ...tools.schemas import ToolContext
-from .batching import BatchAssembler, BatchBudget, BatchValidator, LogicalUnitBuilder, token_estimate
-from .evidence import EvidenceValidationService, canonical_evidence_text, plain_evidence_text
-from .ledger import LedgerService, SceneViewService
-from .quality import QualityCheckService, QualityGateError
+from ..legal.metadata import derive_task_legal_facts, match_legal_documents
+from ..legal.retrieval import rank_legal_units
+from .batching import (
+    BatchAssembler, BatchBudget, BatchValidator, LogicalUnitBuilder, token_estimate,
+)
+from .candidates import (
+    collect_system_warnings, deduplicate_findings, deterministic_hard_facts,
+    extraction_batch_payload, merge_candidate_items, validate_candidate_items,
+    extraction_failure_finding,
+)
+from .evidence import EvidenceValidationService
+from .ledger import LedgerService, SceneViewService, procurement_assertions
+from .quality import (
+    QualityCheckService, QualityGateError,
+    retry_table_ranges, supplement_damaged_table_text, table_direct_ocr_pages,
+    table_retry_ranges,
+)
+from .structure import (
+    batch_manifest, block_payload, classify_structure_heading, deduplicate_objects,
+    deterministic_clause_relations, deterministic_inventories, deterministic_references,
+    merge_structure_profiles, structure_context_for_blocks, structure_review_batches,
+)
 from app.core.config import get_settings
-from app.repositories.rule_repository import RuleRepository
+from app.repositories.backend import get_rule_repository
 
 
 STEPS = [
@@ -64,7 +81,8 @@ TOPIC_FOCUS = {
     "合同履约与责任": "合同 履约 验收 付款 违约 责任",
 }
 PROCUREMENT_EXTRACTION_CONTRACT = """
-\n输入blocks短键：id=block_id，t=type，p=page，r=内容角色，x=原文，tf=表格分片。
+\n输入blocks短键：id=block_id，t=type，p=page，r=内容角色，x=原文，tbl=表格业务记录，tf=表格分片。
+表格优先读取tbl；其中结构关系是带置信度的解析结果，引用仍必须使用真实id和连续原文。
 返回严格JSON：{"candidate_items":[{"primary_category":"","requirement_type":"","statement":"","evidence_block_ids":[""],"evidence_quote":""}]}。
 顶层只能有candidate_items；可选字段仅在有原文依据且非空时输出。
 """
@@ -72,7 +90,7 @@ PROCUREMENT_EXTRACTION_CONTRACT = """
 
 class WorkflowEngine:
     """执行九步审查流水线，并在每一步完成后保存可恢复检查点。"""
-    # ponytail: keep this migrated workflow intact for traceability; split parse/ledger/review stages only after their backend contracts stabilize.
+    # ponytail：为便于追溯，保留迁移后的工作流；待后端契约稳定后再拆分解析、台账和审查阶段。
 
     def __init__(
         self,
@@ -88,8 +106,8 @@ class WorkflowEngine:
         formal_root = skills_path.parent / "skills"
         self.formal_skills = {
             "structure": load_formal_skill(formal_root / "understand-document-structure"),
-            # Extraction runs once per batch. Keep the reusable rules, but do not resend the
-            # long reference examples on every stateless request.
+            # 每个批次只执行一次提取。保留可复用规则，但不要在每次无状态请求中重复发送
+            # 冗长的参考示例。
             "procurement": load_formal_skill(
                 formal_root / "understand-procurement-document", include_references=False
             ),
@@ -224,56 +242,69 @@ class WorkflowEngine:
         for role, document in parsed["documents"].items():
             prepared, actions = checker.prepare(document)
             report = checker.check(prepared)
+            supplement_damaged_table_text(
+                mineru, prepared, Path(state["documents"][role]), report,
+            )
+            report = checker.check(prepared)
             report["actions"] = actions
             parsed["documents"][role] = prepared
-            if report["status"] == "retryable" and Path(state["documents"][role]).suffix.lower() != ".json":
-                table_failure = any(issue.get("code") == "TABLE_STRUCTURE" for issue in report.get("issues", []))
+            table_codes = {"TABLE_STRUCTURE", "TABLE_CONTENT_QUALITY", "EMPTY_TABLE_PLACEHOLDER"}
+            table_failure = any(issue.get("code") in table_codes for issue in report.get("issues", []))
+            retryable_parse = report["status"] == "retryable" or table_failure
+            if retryable_parse and Path(state["documents"][role]).suffix.lower() != ".json":
                 retry_backend = str(mineru_config.get("table_retry_backend") or "hybrid-engine") if table_failure else mineru.backend
                 retry_effort = str(mineru_config.get("table_retry_effort") or "high") if table_failure else mineru.effort
-                retry_method = "auto" if table_failure else "ocr"
+                direct_ocr_pages = table_direct_ocr_pages(prepared, report) if table_failure else set()
+                retry_method = "adaptive" if table_failure else "ocr"
                 store.event(
                     "WARNING", "quality_check", "retry_started",
-                    f"{role}解析质量可重试，切换 {retry_backend}/{retry_method} 模式",
-                    backend=retry_backend, parse_method=retry_method, effort=retry_effort,
+                    (f"{role}表格异常，按问题类型执行局部 OCR 或 Hybrid→OCR"
+                     if table_failure else f"{role}解析质量可重试，切换 {retry_backend}/{retry_method} 模式"),
+                    backend="adaptive" if table_failure else retry_backend,
+                    parse_method=retry_method, effort=retry_effort,
                 )
                 try:
                     if table_failure:
-                        ranges = _table_retry_ranges(prepared, report)
-                        reparsed = prepared
-                        for start_page, end_page in ranges:
-                            partial = mineru.parse(
-                                Path(state["documents"][role]),
-                                store.run_dir / "mineru_retry" / role / f"pages_{start_page}_{end_page}", role,
-                                parse_method=retry_method, backend=retry_backend, effort=retry_effort,
-                                start_page_id=start_page - 1, end_page_id=end_page - 1,
-                            )
-                            reparsed = _merge_page_retry(reparsed, partial, start_page, end_page, role)
+                        ranges = table_retry_ranges(prepared, report)
+                        reparsed, retry_attempts = retry_table_ranges(
+                            prepared, Path(state["documents"][role]), store.run_dir / "mineru_retry" / role,
+                            role, ranges, direct_ocr_pages, mineru, retry_backend, retry_effort,
+                            memo_path=store.run_dir.parent / "table_retry_memo.json",
+                        )
                     else:
                         ranges = []
+                        retry_attempts = []
                         reparsed = mineru.parse(
                             Path(state["documents"][role]), store.run_dir / "mineru_retry" / role, role,
                             parse_method=retry_method, backend=retry_backend, effort=retry_effort,
                         )
                     reparsed, retry_actions = checker.prepare(reparsed)
                     retry_report = checker.check(reparsed)
+                    supplement_damaged_table_text(
+                        mineru, reparsed, Path(state["documents"][role]), retry_report,
+                    )
+                    retry_report = checker.check(reparsed)
                     retry_report["retry"] = {
-                        "attempted": True, "status": "completed", "backend": retry_backend,
+                        "attempted": True, "status": "completed",
+                        "backend": "adaptive" if table_failure else retry_backend,
                         "parse_method": retry_method, "effort": retry_effort,
                         "previous_status": report["status"],
                         "page_ranges": ranges,
+                        "attempts": retry_attempts,
                     }
                     retry_report["actions"] = retry_actions
                     parsed["documents"][role] = reparsed
                     report = retry_report
                 except Exception as exc:
                     report["retry"] = {
-                        "attempted": True, "status": "failed", "backend": retry_backend,
+                        "attempted": True, "status": "failed",
+                        "backend": "adaptive" if table_failure else retry_backend,
                         "parse_method": retry_method, "effort": retry_effort,
                         "previous_status": report["status"], "error_type": type(exc).__name__,
                     }
                     store.event(
                         "WARNING", "quality_check", "retry_failed",
-                        f"{retry_backend} 重解析失败，回退首次解析并生成无法判断问题",
+                        f"{'表格自适应' if table_failure else retry_backend} 重解析失败，回退首次解析并生成无法判断问题",
                         error_type=type(exc).__name__,
                     )
             if report["status"] != "unreliable" and any(
@@ -378,6 +409,10 @@ class WorkflowEngine:
                             "batch_no": batch_no,
                             "blocks": block_payload(blocks),
                         },
+                        max_tokens=6_000,
+                        stream=True,
+                        idle_timeout_seconds=120,
+                        total_timeout_seconds=480,
                     )
                 )
             profiles[role] = merge_structure_profiles(base, partials, quality.get(role, {}))
@@ -396,6 +431,7 @@ class WorkflowEngine:
         max_request_tokens = int(workflow_config.get("max_request_tokens", 12_000))
         output_tokens = int(workflow_config.get("output_tokens", 3_000))
         rerun_batches = {int(value) for value in workflow_config.get("rerun_batches", [])}
+        debug_extract_batches = {int(value) for value in workflow_config.get("debug_extract_batches", [])}
         rerun_output_tokens = int(workflow_config.get("rerun_output_tokens", output_tokens))
         extract_stream = bool(workflow_config.get("extract_stream", True))
         rerun_stream = bool(workflow_config.get("rerun_stream", extract_stream))
@@ -439,6 +475,10 @@ class WorkflowEngine:
             structure_profile = profiles.get(role, {})
             role_items: list[dict[str, Any]] = []
             sections = review_manifest.get("batches", [])
+            if debug_extract_batches:
+                sections = [batch for batch in sections if int(batch.get("batch_no") or 0) in debug_extract_batches]
+                if not sections:
+                    raise ValueError(f"未找到指定调试批次：{sorted(debug_extract_batches)}")
             store.event(
                 "INFO",
                 "extract_candidates",
@@ -465,6 +505,8 @@ class WorkflowEngine:
                         "text": b["text"],
                         "role": b["role"],
                         "table_fragment": b.get("table_fragment"),
+                        "table_html": b.get("table_html"),
+                        "table_business": b.get("table_business"),
                     }
                     for b in batch.get("blocks", [])
                 ]
@@ -545,6 +587,33 @@ class WorkflowEngine:
                     )
                 except RuntimeError as exc:
                     cause = exc.__cause__ or exc
+                    if isinstance(cause, (OutputLengthExceeded, JsonGuardAbort)):
+                        # 输出未完整生成（截断或守卫掐断）都是本批"写不完"，且温度0下同输入会原样重演，
+                        # 只有拆批改输入才可能写完。按主块中点拆成子批重提，递归直到单批写得完。
+                        retry_batches = _split_batch_for_output(batch, batch_no)
+                        if retry_batches:
+                            sub_results = [extract_batch(sub) for sub in retry_batches]
+                            accepted = [item for r in sub_results for item in r[1]]
+                            rejected = [item for r in sub_results for item in r[2]]
+                            sub_failures = [r[4] for r in sub_results if r[4]]
+                            failure = {
+                                "code": "OUTPUT_LENGTH_SHRUNK",
+                                "error_type": type(cause).__name__,
+                                "message": f"输出未完整生成（{type(cause).__name__}），已按 {len(retry_batches)} 个子批重提，{len(sub_failures)} 个子批仍失败",
+                                "request_tokens": request_tokens,
+                            } if sub_failures else None
+                            for item in accepted:
+                                item["source_batch"] = batch_no
+                            write_json(checkpoint, {
+                                "schema_version": 8, "status": "completed",
+                                "document_role": role, "batch_no": batch_no,
+                                "input_fingerprint": fingerprint, "request_tokens": request_tokens,
+                                "primary_block_count": batch.get("primary_block_count", len(batch.get("primary_block_ids", []))),
+                                "candidate_estimate": batch.get("candidate_estimate"),
+                                "table_row_count": batch.get("table_row_count"),
+                                "accepted": accepted, "rejected": rejected, "failure": failure,
+                            })
+                            return batch_no, accepted, rejected, False, failure
                     failure = {
                         "code": "LLM_BATCH_UNAVAILABLE",
                         "error_type": type(cause).__name__,
@@ -701,7 +770,7 @@ class WorkflowEngine:
                         count=len(rejected),
                     )
                 if failure:
-                    extraction_findings.append(_extraction_failure_finding(role, batch_no, failure))
+                    extraction_findings.append(extraction_failure_finding(role, batch_no, failure))
             candidates[role] = role_items
             batch_reports[role] = role_reports
         return {
@@ -959,8 +1028,8 @@ class WorkflowEngine:
     ) -> dict[str, Any]:
         """筛选可执行规则，并从法规知识目录召回相关条款单元。"""
         config = self.config.get("rules", {})
-        rules = RuleRepository(Path(get_settings().data_dir)).applicable_rules(state["scenario"])
-        rule_source = "JsonRuleRepository"
+        rules = get_rule_repository(Path(get_settings().data_dir)).applicable_rules(state["scenario"])
+        rule_source = "RuleRepository"
         view_text = json.dumps(self._previous(store, "build_scene_view"), ensure_ascii=False)
         matched = search_rules(
             context=ToolContext(run_id=str(getattr(store, "run_id", state.get("run_id", "workflow")))),
@@ -1355,50 +1424,6 @@ def load_formal_skill(skill_dir: Path, include_references: bool = True) -> str:
     return "\n".join(parts)
 
 
-def merge_structure_profiles(
-    base: dict[str, Any], partials: list[dict[str, Any]], quality: dict[str, Any]
-) -> dict[str, Any]:
-    """合并章节级结构结果，同时以确定性完整目录覆盖模型遗漏。"""
-    profile = {
-        "skill": "understand-document-structure",
-        "skill_version": "1.0.0",
-        **base,
-        "quality_status": quality.get("status"),
-        "section_responsibilities": list(base.get("section_responsibilities", [])),
-        "parties": [],
-        "terms": [],
-        "references": list(base.get("references", [])),
-        "clause_relations": list(base.get("clause_relations", [])),
-        "global_constraints": [],
-        "inventories": {
-            name: list(base.get("inventories", {}).get(name, []))
-            for name in ("tables", "images", "attachments")
-        },
-        "warnings": list(quality.get("issues", [])),
-        "unresolved": [],
-    }
-    for key in ("section_responsibilities", "parties", "terms", "references", "clause_relations", "global_constraints", "warnings", "unresolved"):
-        values = [item for partial in partials for item in partial.get(key, []) if isinstance(item, dict)]
-        profile[key] = deduplicate_objects(profile.get(key, []) + values)
-    for inventory in ("tables", "images", "attachments"):
-        values = [
-            item
-            for partial in partials
-            for item in partial.get("inventories", {}).get(inventory, [])
-            if isinstance(item, dict)
-        ]
-        profile["inventories"][inventory] = deduplicate_objects(profile["inventories"][inventory] + values)
-    return profile
-
-
-def deduplicate_objects(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """按规范化JSON去重章节批次合并结果。"""
-    unique: dict[str, dict[str, Any]] = {}
-    for item in items:
-        unique[json.dumps(item, ensure_ascii=False, sort_keys=True)] = item
-    return list(unique.values())
-
-
 def summarize(value: Any) -> dict[str, Any]:
     """生成日志用的小摘要，避免把全文写进events.jsonl。"""
     if not isinstance(value, dict):
@@ -1415,68 +1440,6 @@ def summarize(value: Any) -> dict[str, Any]:
     return summary
 
 
-def block_payload(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """构造结构理解输入Block；版面噪声保留在原文层但不发送给LLM。"""
-    return [
-        {
-            "block_id": b.get("block_id"),
-            "block_type": b.get("block_type"),
-            "heading_path": b.get("heading_path", []),
-            "page_no": b.get("page_no"),
-            "text": b.get("text", ""),
-        }
-        for b in blocks
-        if b.get("text") and b.get("block_type") not in {"header", "footer", "page_number"}
-    ]
-
-
-def structure_context_for_blocks(
-    profile: dict[str, Any], block_ids: set[str], include_all: bool = False
-) -> dict[str, Any]:
-    """Project verified structure facts into a batch; summaries never become evidence."""
-    def ids(item: dict[str, Any]) -> set[str]:
-        values: set[str] = set()
-        for key in ("block_id", "block_ids", "evidence_block_ids", "source_block_ids", "target_block_ids"):
-            value = item.get(key)
-            if isinstance(value, list):
-                values.update(str(part) for part in value if part)
-            elif value:
-                values.add(str(value))
-        return values
-
-    def relevant(items: Any, limit: int = 100) -> list[dict[str, Any]]:
-        if not isinstance(items, list):
-            return []
-        return [
-            item for item in items
-            if isinstance(item, dict) and (include_all or bool(ids(item) & block_ids))
-        ][:limit]
-
-    if not include_all:
-        return {
-            key: values
-            for key, values in {
-                "terms": relevant(profile.get("terms")),
-                "references": relevant(profile.get("references")),
-                "global_constraints": relevant(profile.get("global_constraints")),
-                "unresolved": relevant(profile.get("unresolved")),
-            }.items()
-            if values
-        }
-
-    inventories = profile.get("inventories", {}) if isinstance(profile.get("inventories"), dict) else {}
-    return {
-        "quality_status": profile.get("quality_status"),
-        "section_responsibilities": relevant(profile.get("section_responsibilities")),
-        "terms": relevant(profile.get("terms")),
-        "references": relevant(profile.get("references")),
-        "global_constraints": relevant(profile.get("global_constraints")),
-        "attachments": relevant(inventories.get("attachments")),
-        "unresolved": relevant(profile.get("unresolved")),
-        "evidence_policy": "结构画像只用于语义上下文，任何候选问题仍须引用原始Block ID。",
-}
-
-
 def compact_batch_quality(validation: Any) -> dict[str, Any] | None:
     """Do not repeat the full batch-validation report in every model request."""
     if not isinstance(validation, dict):
@@ -1489,585 +1452,23 @@ def compact_batch_quality(validation: Any) -> dict[str, Any] | None:
     return {"status": validation.get("status"), "issue_codes": list(dict.fromkeys(codes))}
 
 
-def extraction_batch_payload(role: str, blocks: list[dict[str, Any]]) -> dict[str, Any]:
-    """构造事项提取的精简输入，章节信息每批只发送一次。"""
-    paths: list[list[str]] = []
-    hints: list[str] = []
-    for block in blocks:
-        path = [str(part) for part in block.get("heading_path", []) if part]
-        if path and path not in paths:
-            paths.append(path)
-        if block.get("block_type") == "heading" and block.get("text"):
-            hint = classify_structure_heading(role, str(block["text"]))
-            if hint and hint not in hints:
-                hints.append(hint)
-    return {
-        "section_context": {"paths": paths, "category_hints": hints},
-        "blocks": [
-            {
-                "id": block.get("block_id"),
-                "t": block.get("block_type"),
-                "p": block.get("page_no"),
-                "r": block.get("role"),
-                "x": block.get("text", ""),
-                **({"tf": block.get("table_fragment")} if block.get("table_fragment") else {}),
-            }
-            for block in blocks
-            if block.get("text") and block.get("block_type") not in {"header", "footer", "page_number"}
-        ],
-    }
-
-
-STRUCTURE_HEADING_RULES = {
-    "procurement": [
-        (r"公告|邀请|项目概况", "采购公告与项目概况"),
-        (r"须知|前附表", "供应商须知"),
-        (r"资格|资质|实质性", "资格与实质性条件"),
-        (r"技术|需求|参数|验收", "技术需求与验收"),
-        (r"评审|评分|评标", "评审办法与评分"),
-        (r"报价|商务|付款|结算", "商务报价与付款"),
-        (r"合同|履约|违约", "合同范本与履约"),
-        (r"附件|格式|响应文件", "附件与格式文件"),
-        (r"目录", "目录"),
-    ],
-    "response": [
-        (r"资格|资质|证明", "资格响应"),
-        (r"技术|参数|验收", "技术响应"),
-        (r"商务|报价|价格", "商务与报价响应"),
-        (r"偏离|承诺", "偏离与承诺"),
-        (r"附件|目录", "附件与目录"),
-    ],
-    "contract": [
-        (r"主体|甲方|乙方|当事人", "合同主体"),
-        (r"标的|范围|内容", "合同标的与范围"),
-        (r"金额|价款|税率", "金额与税率"),
-        (r"交付|履约|验收|质保", "履约与验收"),
-        (r"付款|结算", "付款结算"),
-        (r"违约|责任|争议", "责任与争议"),
-        (r"保密|知识产权", "保密与知识产权"),
-        (r"附件|目录", "附件与目录"),
-    ],
-}
-
-
-def classify_structure_heading(role: str, title: str) -> str | None:
-    """按文档角色把明确标题映射为章节职责；无法判断时返回None。"""
-    return next((label for pattern, label in STRUCTURE_HEADING_RULES[role] if re.search(pattern, title)), None)
-
-
-def structure_review_batches(
-    blocks: list[dict[str, Any]], role: str, max_chars: int
-) -> list[list[dict[str, Any]]]:
-    """仅选择无标题文档或整批没有可分类标题的章节批次交给LLM。"""
-    batches = section_batches(blocks, max_chars)
-    headings = [b for b in blocks if b.get("block_type") == "heading" and b.get("text")]
-    if not headings:
-        return batches
-    return [
-        batch
-        for batch in batches
-        if not any(
-            b.get("block_type") == "heading"
-            and b.get("text")
-            and classify_structure_heading(role, str(b["text"]))
-            for b in batch
-        )
-    ]
-
-
-def deterministic_inventories(blocks: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    """从Block类型和附件标题生成无需LLM的表格、图片与附件清单。"""
-    def item(block: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "block_id": block.get("block_id"),
-            "page_no": block.get("page_no"),
-            "title": str(block.get("text") or "")[:200],
-        }
-
-    return {
-        "tables": [item(b) for b in blocks if b.get("block_type") == "table"],
-        "images": [item(b) for b in blocks if b.get("block_type") == "image"],
-        "attachments": [
-            item(b)
-            for b in blocks
-            if b.get("block_type") == "heading" and re.search(r"附件|附录|格式", str(b.get("text") or ""))
-        ],
-    }
-
-
-def deterministic_clause_relations(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Identify article/paragraph/item parentage while retaining original Block IDs."""
-    relations, current_article, current_item = [], None, None
-    for block in blocks:
-        text = str(block.get("text") or "").strip()
-        if re.match(r"^第[一二三四五六七八九十百千万\d]+条", text):
-            current_article, current_item = block.get("block_id"), None
-            continue
-        if re.match(r"^[（(][一二三四五六七八九十\d]+[）)]", text):
-            if current_article:
-                relations.append({"parent_block_id": current_article, "child_block_id": block.get("block_id"), "relation_type": "article_item"})
-            current_item = block.get("block_id")
-            continue
-        if re.match(r"^\d+[.、]", text) and (current_item or current_article):
-            relations.append({"parent_block_id": current_item or current_article, "child_block_id": block.get("block_id"), "relation_type": "item_subitem"})
-    return relations
-
-
-def deterministic_references(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Resolve explicit attachment, chapter, fore-table and numbered-clause references globally."""
-    targets: dict[str, list[str]] = defaultdict(list)
-    reference_pattern = re.compile(
-        r"附件\s*[一二三四五六七八九十\d]+|"
-        r"第[一二三四五六七八九十\d]+章(?:第?\s*\d+(?:\.\d+)*\s*款)?|"
-        r"前附表|第\s*\d+(?:\.\d+)*\s*款"
-    )
-    def keys(text: str) -> set[str]:
-        return {re.sub(r"\s+", "", value) for value in reference_pattern.findall(text)}
-
-    for block in blocks:
-        text = plain_evidence_text(block.get("text"))
-        if block.get("block_type") == "heading" or "前附表" in text or re.match(r"^\s*\d+(?:\.\d+)+", text):
-            for key in keys(text):
-                targets[key].append(block.get("block_id"))
-            number = re.match(r"^\s*(\d+(?:\.\d+)+)", text)
-            if number:
-                targets[f"第{number.group(1)}款"].append(block.get("block_id"))
-    references = []
-    for block in blocks:
-        text = plain_evidence_text(block.get("text"))
-        if not re.search(r"详见|参见|见第|见前附表|依据|按照", text):
-            continue
-        for value in reference_pattern.findall(text):
-            key = re.sub(r"\s+", "", value)
-            if block.get("block_id") in targets.get(key, []):
-                continue
-            matched = list(dict.fromkeys(targets.get(key, [])))
-            if not matched and "章" in key:
-                chapter, clause = key.split("章", 1)
-                matched = list(dict.fromkeys(targets.get(clause, []) or targets.get(chapter + "章", [])))
-            references.append({"reference_text": value, "source_block_ids": [block.get("block_id")], "target_block_ids": matched, "relation_type": "attachment_reference", "status": "resolved" if len(matched) == 1 else "ambiguous" if matched else "unresolved", "confidence": 1.0 if len(matched) == 1 else 0.5})
-    return references
-
-
-def section_batches(blocks: list[dict[str, Any]], max_chars: int) -> list[list[dict[str, Any]]]:
-    """按标题优先、字符上限兜底生成运行时章节批次，不持久化固定Chunk。"""
-    batches: list[list[dict[str, Any]]] = []
-    current: list[dict[str, Any]] = []
-    size = 0
-    for block in blocks:
-        text = str(block.get("text") or "")
-        text_size = len(text)
-        if text_size > max_chars:
-            if current:
-                batches.append(current)
-                current, size = [], 0
-            for fragment_index, start in enumerate(range(0, text_size, max_chars), start=1):
-                fragment = {
-                    **block,
-                    "text": text[start : start + max_chars],
-                    "runtime_fragment": {
-                        "index": fragment_index,
-                        "char_range": [start, min(start + max_chars, text_size)],
-                    },
-                }
-                batches.append([fragment])
-            continue
-        starts_section = block.get("block_type") == "heading" and current
-        if current and (size + text_size > max_chars or starts_section and size > max_chars // 3):
-            batches.append(current)
-            current, size = [], 0
-        current.append(block)
-        size += text_size
-    if current:
-        batches.append(current)
-    return batches or [[]]
-
-
-def batch_manifest(batch_no: int, blocks: list[dict[str, Any]]) -> dict[str, Any]:
-    """Persist a readable record of a runtime batch without duplicating full text."""
-    headings = [str(block.get("text") or "") for block in blocks if block.get("block_type") == "heading"]
-    return {
-        "batch_no": batch_no,
-        "block_count": len(blocks),
-        "character_count": sum(len(str(block.get("text") or "")) for block in blocks),
-        "page_range": [min((block.get("page_no") or 0 for block in blocks), default=0), max((block.get("page_no") or 0 for block in blocks), default=0)],
-        "heading": headings[0] if headings else "无独立标题的内容单元",
-        "block_ids": [block.get("block_id") for block in blocks],
-    }
-
-
-def derive_candidate_hints(role: str, blocks: list[dict[str, Any]], categories: list[str]) -> list[dict[str, Any]]:
-    """Derive candidate hints from locally parsed blocks."""
-    keywords = {
-        "procurement": "应|须|不得|资格|评分|报价|限价|验收|付款|合同|期限|时间",
-        "response": "响应|承诺|满足|提供|偏离|报价|资质|业绩|人员|参数",
-        "contract": "甲方|乙方|应|合同|金额|付款|交付|验收|质保|违约|期限",
-    }[role]
-    items = []
-    for block in blocks:
-        text = str(block.get("text") or "").strip()
-        if not text or not re.search(keywords, text):
-            continue
-        category = classify_candidate_category(role, text, categories)
-        items.append(
-            {
-                "category": category,
-                "statement": text[:800],
-                "subject": "",
-                "action": "",
-                "condition": "",
-                "value": "",
-                "mandatory": bool(re.search(r"应|须|不得|必须", text)),
-                "evidence_block_ids": [block["block_id"]],
-                "evidence_quote": text[:300],
-            }
-        )
-    return items
-
-
-def classify_candidate_category(role: str, text: str, categories: list[str]) -> str:
-    """Classify a locally derived candidate hint by keyword."""
-    maps = {
-        "procurement": [
-            ("资格|资质|业绩", "资格与实质性条件"),
-            ("评分|分值|评审", "评审办法与评分"),
-            ("技术|参数|验收", "技术需求与验收"),
-            ("报价|限价|付款|结算", "商务报价与付款"),
-            ("合同|违约|履约|质保", "合同履约与责任"),
-            ("附件|格式|引用", "附件与引用"),
-        ],
-        "response": [
-            ("资格|资质|证书|业绩", "资格响应"),
-            ("技术|参数|验收", "技术响应"),
-            ("报价|价格", "报价"),
-            ("偏离", "偏离"),
-            ("承诺|附件", "承诺与附件"),
-        ],
-        "contract": [
-            ("主体|甲方|乙方", "合同主体"),
-            ("金额|税率", "金额与税率"),
-            ("交付|验收", "交付与验收"),
-            ("付款|结算", "付款结算"),
-            ("质保|服务", "质保服务"),
-            ("违约", "违约责任"),
-            ("保密|知识产权", "保密与知识产权"),
-        ],
-    }
-    for pattern, category in maps[role]:
-        if re.search(pattern, text):
-            return category
-    return categories[0]
-
-
-def validate_candidate_items(
-    items: Any, valid_ids: set[str], blocks: list[dict[str, Any]]
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Only admit complete, source-grounded candidates to the formal ledger."""
-    if not isinstance(items, list):
-        return [], [{"reason": "items不是数组"}]
-    text_by_id = {b["block_id"]: str(b.get("text") or "") for b in blocks}
-    accepted, rejected = [], []
-    for item in items:
-        if not isinstance(item, dict):
-            rejected.append({"value": item, "reason": "候选不是对象"})
-            continue
-        requested_ids = [str(x) for x in item.get("evidence_block_ids", [])]
-        ids = [block_id for block_id in requested_ids if block_id in valid_ids]
-        quote = str(item.get("evidence_quote") or "").strip()
-        normalized_quote = evidence_match_text(quote)
-        quote_matches = [block_id for block_id, text in text_by_id.items() if normalized_quote and normalized_quote in evidence_match_text(text)]
-        location_method = "block_id"
-        if not ids and quote_matches:
-            ids = quote_matches[:3]
-            location_method = "quote_fallback"
-        if ids and normalized_quote in evidence_match_text("".join(text_by_id[block_id] for block_id in ids)):
-            quote_matches = list(dict.fromkeys([*quote_matches, *ids]))
-        statement = str(item.get("statement") or "").strip()
-        quality_errors = candidate_quality_errors(statement, quote, ids, quote_matches)
-        if quality_errors:
-            rejected.append({
-                "value": item,
-                "reason": ",".join(quality_errors),
-                "retryable": True,
-            })
-            continue
-        category = item.get("category") or item.get("primary_category") or "未分类"
-        mandatory_signal = item.get("mandatory_signal")
-        accepted.append(
-            {
-                **item,
-                "category": category,
-                "value": item.get("value", item.get("source_value", "")),
-                "mandatory": item.get("mandatory", mandatory_signal == "explicit_mandatory"),
-                "evidence_block_ids": ids,
-                "evidence_status": "verified",
-                "evidence_validation": {
-                    "located": bool(ids),
-                    "location_method": location_method if ids else "unresolved",
-                    "quote_matches_block": True,
-                    "recovered_block_ids": [block_id for block_id in ids if block_id not in requested_ids],
-                    "invalid_block_ids": [block_id for block_id in requested_ids if block_id not in valid_ids],
-                    "reason": None,
-                },
-            }
-        )
-    return accepted, rejected
-
-
-INCOMPLETE_CANDIDATE_END = re.compile(
-    r"(?:并在|以及|并且|且|并|或|在|为|符合|标识|包括|如下|下列|[：:、，,])$"
-)
-
-
-def candidate_quality_errors(
-    statement: str,
-    quote: str,
-    block_ids: list[str],
-    quote_matches: list[str],
-) -> list[str]:
-    """Return deterministic admission failures; no model judgement at the trust boundary."""
-    errors: list[str] = []
-    compact = re.sub(r"\s+", "", statement)
-    if len(compact) < 6 or not re.search(r"[\u4e00-\u9fffA-Za-z0-9]", compact):
-        errors.append("incomplete_statement")
-    elif INCOMPLETE_CANDIDATE_END.search(compact):
-        errors.append("incomplete_statement")
-    if not quote:
-        errors.append("evidence_quote_required")
-    if not block_ids:
-        errors.append("evidence_block_required")
-    elif not any(block_id in quote_matches for block_id in block_ids):
-        errors.append("evidence_quote_mismatch")
-    return errors
-
-
-def evidence_match_text(value: Any) -> str:
-    """Backward-compatible alias for the shared evidence representation."""
-    return canonical_evidence_text(value)
-
-
-def merge_candidate_items(model_items: Any, hard_facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Keep model semantics, then fill only missing deterministic fact types."""
-    items = list(model_items) if isinstance(model_items, list) else []
-    existing = {
-        (str(item.get("requirement_type") or ""), tuple(item.get("evidence_block_ids", [])))
-        for item in items if isinstance(item, dict)
-    }
-    return items + [
-        item for item in hard_facts
-        if (item["requirement_type"], tuple(item["evidence_block_ids"])) not in existing
-    ]
-
-
-def deterministic_hard_facts(role: str, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Extract a few exact project facts that should never depend on model recall."""
-    if role != "procurement":
+def _split_batch_for_output(batch: dict[str, Any], batch_no: int) -> list[dict[str, Any]]:
+    """输出超限时按主块中点把批次拆成两个子批，供缩批重提。"""
+    blocks = batch.get("blocks", [])
+    primary_indices = [i for i, block in enumerate(blocks) if block.get("role") == "primary"]
+    if len(primary_indices) < 2:
         return []
-    facts: list[dict[str, Any]] = []
-    methods = {
-        "公开招标": "open_tender", "邀请招标": "invited_tender", "竞争性磋商": "competitive_consultation",
-        "竞争性谈判": "competitive_negotiation", "询价": "inquiry", "单一来源": "single_source",
-    }
-    for block in blocks:
-        block_id = str(block.get("block_id") or "")
-        text = plain_evidence_text(block.get("text"))
-        if not block_id or not text:
-            continue
-
-        project_code = re.search(r"项目编号\s*[:：]?\s*([A-Za-z0-9][A-Za-z0-9._/-]{2,})", text)
-        if project_code:
-            value = project_code.group(1)
-            facts.append(hard_fact(block_id, "project_code", f"项目编号：{value}", "采购项目", "项目编号", value, False))
-
-        method = next(((label, value) for label, value in methods.items() if label in text), None)
-        if method:
-            label, value = method
-            facts.append(hard_fact(block_id, "procurement_method", f"采购方式：{label}", "采购项目", "采购方式", value, False, label))
-
-        deadline = re.search(
-            r"((?:响应|投标)截止时间\s*[:：]?\s*20\d{2}年\s*\d{1,2}月\s*\d{1,2}日(?:\s*\d{1,2}:\d{2})?(?:（北京时间）)?)",
-            text,
-        )
-        if deadline:
-            quote = re.sub(r"\s+", "", deadline.group(1))
-            value = re.sub(r"^(?:响应|投标)截止时间[:：]?", "", quote)
-            facts.append(hard_fact(block_id, "submission_deadline", quote, "供应商", "提交响应文件", value, True, value))
-    return facts
-
-
-def hard_fact(
-    block_id: str, requirement_type: str, statement: str, subject: str,
-    obj: str, value: str, mandatory: bool, source_value: str | None = None,
-) -> dict[str, Any]:
-    fingerprint = hashlib.sha1(f"{block_id}|{requirement_type}|{value}".encode()).hexdigest()[:10]
-    return {
-        "candidate_id": f"HARD-{fingerprint}",
-        "primary_category": "项目与日程",
-        "category_tags": ["项目与日程"],
-        "category": "项目与日程",
-        "requirement_type": requirement_type,
-        "statement": statement,
-        "subject": subject,
-        "action": "明确" if not mandatory else "提交",
-        "object": obj,
-        "condition": None,
-        "source_value": source_value or value,
-        "normalized_value": None,
-        "mandatory_signal": "explicit_mandatory" if mandatory else "explicit_fact",
-        "mandatory": mandatory,
-        "response_materials": [],
-        "evidence_block_ids": [block_id],
-        "evidence_quote": statement,
-        "confidence": 1.0,
-    }
-
-
-def normalize_text(text: str) -> str:
-    """生成候选去重键，保留数字和否定词。"""
-    return re.sub(r"[\s，。；：、,.;:（）()]+", "", str(text)).lower()
-
-
-def procurement_assertions(value: Any) -> list[dict[str, Any]]:
-    """Read current three-layer ledgers and legacy flat checkpoint artifacts."""
-    if isinstance(value, list):
-        return value
-    return value.get("source_assertions", []) if isinstance(value, dict) else []
-
-
-def similarity(left: str, right: str) -> float:
-    """用中文字符二元组计算可解释相似度，MVP用于候选对齐初筛。"""
-    def grams(text: str) -> set[str]:
-        value = normalize_text(text)
-        return {value[i : i + 2] for i in range(max(len(value) - 1, 0))}
-
-    a, b = grams(left), grams(right)
-    if not a or not b:
-        return 0.0
-    return len(a & b) / len(a | b)
-
-
-def derive_task_legal_facts(
-    documents: dict[str, dict[str, Any]], ledger: list[dict[str, Any]], task_context: dict[str, Any]
-) -> dict[str, Any]:
-    """Derive only explicit procurement facts; absence always remains unknown."""
-    sources = []
-    for role, document in documents.items():
-        for block in document.get("blocks", []):
-            text = str(block.get("text") or "")
-            if text:
-                sources.append({"source": "document", "role": role, "block_id": block.get("block_id"), "quote": text})
-    for item in ledger:
-        text = str(item.get("statement") or item.get("evidence_quote") or "")
-        if text:
-            sources.append({"source": "ledger", "item_id": item.get("item_id"), "quote": text})
-    project = task_context.get("project", {}) if isinstance(task_context, dict) else {}
-    for field in ("name", "project_code", "title"):
-        if project.get(field):
-            sources.append({"source": "project", "field": field, "quote": str(project[field])})
-    if isinstance(task_context, dict) and task_context.get("title"):
-        sources.append({"source": "task", "field": "title", "quote": str(task_context["title"])})
-
-    def evidence_for(*terms: str) -> list[dict[str, Any]]:
-        return [source for source in sources if any(term in source["quote"] for term in terms)][:5]
-
-    def choice(mapping: list[tuple[str, tuple[str, ...]]]) -> tuple[str, list[dict[str, Any]]]:
-        matched = [(value, evidence_for(*terms)) for value, terms in mapping if evidence_for(*terms)]
-        values = {value for value, _ in matched}
-        return (matched[0] if len(values) == 1 else ("unknown", [])) if matched else ("unknown", [])
-
-    project_type, project_type_evidence = choice([
-        ("engineering", ("建设工程", "工程项目", "工程采购")),
-        ("goods", ("货物采购", "设备采购", "物资采购")),
-        ("services", ("服务采购", "咨询服务", "技术服务")),
-    ])
-    procurement_method, procurement_method_evidence = choice([
-        ("open_tender", ("公开招标",)), ("invited_tender", ("邀请招标",)),
-        ("competitive_consultation", ("竞争性磋商",)),
-        ("competitive_negotiation", ("竞争性谈判",)), ("inquiry", ("询价",)),
-        ("single_source", ("单一来源",)),
-    ])
-
-    def boolean_fact(yes: tuple[str, ...], no: tuple[str, ...]) -> tuple[str, list[dict[str, Any]]]:
-        no_evidence, yes_evidence = evidence_for(*no), evidence_for(*yes)
-        if no_evidence and not yes_evidence:
-            return "no", no_evidence
-        if yes_evidence and not no_evidence:
-            return "yes", yes_evidence
-        return "unknown", []
-
-    government, government_evidence = boolean_fact(("政府采购",), ("非政府采购", "不属于政府采购"))
-    engineering, engineering_evidence = boolean_fact(("建设工程", "工程项目", "工程采购"), ("非工程", "不属于工程"))
-    mandatory, mandatory_evidence = boolean_fact(("依法必须招标", "必须招标项目"), ("非依法必须招标", "不属于依法必须招标"))
-    regions = [(match.group(0), source) for source in sources for match in re.finditer(r"[\u4e00-\u9fff]{2,8}(?:省|自治区|市)", source["quote"])]
-    region_values = {value for value, _ in regions}
-    region, region_evidence = (next(iter(region_values)), [source for value, source in regions if value == next(iter(region_values))][:3]) if len(region_values) == 1 else ("unknown", [])
-    facts = {
-        "project_type": project_type,
-        "procurement_method": procurement_method,
-        "is_government_procurement": government,
-        "is_engineering_related": engineering,
-        "is_mandatory_tender": mandatory,
-        "region": region,
-        "review_stage": "procurement_document_review",
-        "evidence": {
-            "project_type": project_type_evidence, "procurement_method": procurement_method_evidence,
-            "is_government_procurement": government_evidence, "is_engineering_related": engineering_evidence,
-            "is_mandatory_tender": mandatory_evidence, "region": region_evidence, "review_stage": [],
-        },
-    }
-    return facts
-
-
-def match_legal_documents(facts: dict[str, Any], documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Use only explicit profile predicates; ambiguous profiles stay potential."""
-    decisions = []
-    for document in documents:
-        profile = document.get("applicability", {})
-        conditions = profile_conditions(profile)
-        reasons, missing, outcomes = [], [], []
-        for field, expected, profile_item in conditions:
-            actual = facts.get(field, "unknown")
-            outcome = "insufficient" if actual == "unknown" else "match" if actual == expected else "mismatch"
-            if outcome == "insufficient":
-                missing.append(field)
-            outcomes.append(outcome)
-            reasons.append({"field": field, "expected": expected, "actual": actual, "outcome": outcome, "profile_value": profile_item.get("value")})
-        if any(value == "mismatch" for value in outcomes):
-            status = "not_applicable"
-        elif any(value == "insufficient" for value in outcomes):
-            status = "insufficient_facts"
-        elif conditions:
-            status = "applicable"
-        else:
-            status = "potential"
-            missing.append("applicability_semantics")
-            reasons.append({"field": "applicability", "expected": "explicit project predicate", "actual": "not_available", "outcome": "potential"})
-        source = document["source"]
-        decisions.append({
-            "document_key": source["document_key"], "title": source.get("title"), "status": status,
-            "reasons": reasons,
-            "evidence": {"task_facts": {field: facts.get("evidence", {}).get(field, []) for field, _, _ in conditions}, "profile": [item for _, _, item in conditions]},
-            "missing_facts": sorted(set(missing)), "source_freeze": source["source_freeze"], "_units": document.get("units", []),
-        })
-    return decisions
-
-
-def profile_conditions(profile: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
-    conditions = []
-    for field in ("project_types", "activities", "trigger_conditions", "business_phases"):
-        for item in profile.get(field, []) if isinstance(profile.get(field), list) else []:
-            value = str(item.get("value") or "")
-            if "政府采购" in value:
-                conditions.append(("is_government_procurement", "yes", item))
-            elif "依法必须招标" in value or "必须招标项目" in value:
-                conditions.append(("is_mandatory_tender", "yes", item))
-            elif "工程" in value:
-                conditions.append(("is_engineering_related", "yes", item))
-            elif "采购文件" in value:
-                conditions.append(("review_stage", "procurement_document_review", item))
-            elif "公开招标" in value:
-                conditions.append(("procurement_method", "open_tender", item))
-    return conditions
+    mid = primary_indices[len(primary_indices) // 2]
+    return [
+        {
+            "batch_no": batch_no * 1000 + index,
+            "purpose": batch.get("purpose"),
+            "coverage_strategy": batch.get("coverage_strategy"),
+            "primary_block_count": sum(1 for block in blks if block.get("role") == "primary"),
+            "blocks": blks,
+        }
+        for index, blks in enumerate((blocks[:mid], blocks[mid:]), start=1)
+    ]
 
 
 def _batch_budget(config: dict[str, Any]) -> BatchBudget:
@@ -2082,195 +1483,3 @@ def _batch_budget(config: dict[str, Any]) -> BatchBudget:
     )
 
 
-def _table_retry_ranges(document: dict[str, Any], report: dict[str, Any]) -> list[tuple[int, int]]:
-    """Return small, context-padded page ranges around malformed tables."""
-    by_id = {block.get("block_id"): block for block in document.get("blocks", [])}
-    bad_pages = sorted({
-        int(by_id[block_id].get("page_no") or 0)
-        for issue in report.get("issues", []) if issue.get("code") == "TABLE_STRUCTURE"
-        for block_id in issue.get("block_ids", []) if block_id in by_id and by_id[block_id].get("page_no")
-    })
-    if not bad_pages:
-        raise ValueError("表格重解析缺少可定位页码")
-    max_page = max((int(block.get("page_no") or 0) for block in document.get("blocks", [])), default=max(bad_pages))
-    groups: list[list[int]] = []
-    for page in bad_pages:
-        if not groups or page > groups[-1][-1] + 1:
-            groups.append([page])
-        else:
-            groups[-1].append(page)
-    padded = [(max(1, group[0] - 1), min(max_page, group[-1] + 1)) for group in groups]
-    merged: list[tuple[int, int]] = []
-    for start, end in padded:
-        if merged and start <= merged[-1][1] + 1:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
-        else:
-            merged.append((start, end))
-    return merged
-
-
-def _extraction_failure_finding(role: str, batch_no: int, failure: dict[str, Any]) -> dict[str, Any]:
-    """Expose a missing extraction batch without inventing document evidence."""
-    return {
-        "finding_type": "extraction_quality",
-        "risk_level": "unknown",
-        "title": f"第{batch_no}批内容未完成自动提取",
-        "description": "模型服务或请求预算异常，本批内容未形成完整自动审查结论。",
-        "rationale": failure.get("message"),
-        "recommendation": "在现有经办和主责复核环节查看该批原文后确认。",
-        "document_role": role,
-        "source_batch": batch_no,
-        "evidence_block_ids": [],
-        "evidence_quotes": [],
-        "rule_ids": [],
-        "legal_unit_ids": [],
-        "confidence": 0.0,
-        "needs_human_confirmation": True,
-    }
-
-
-def _merge_page_retry(
-    original: dict[str, Any], partial: dict[str, Any], start_page: int, end_page: int, role: str
-) -> dict[str, Any]:
-    """Replace only the requested pages while retaining the initial Pipeline parse elsewhere."""
-    replacements = [dict(block) for block in partial.get("blocks", [])]
-    if not replacements:
-        raise ValueError(f"Hybrid 未返回第 {start_page}-{end_page} 页内容")
-    page_numbers = [int(block.get("page_no") or 0) for block in replacements]
-    range_length = end_page - start_page + 1
-    if not all(start_page <= page <= end_page for page in page_numbers) and all(
-        1 <= page <= range_length for page in page_numbers
-    ):
-        for block in replacements:
-            block["page_no"] = int(block.get("page_no") or 0) + start_page - 1
-    replacements = [block for block in replacements if start_page <= int(block.get("page_no") or 0) <= end_page]
-    if not replacements:
-        raise ValueError(f"Hybrid 返回内容与第 {start_page}-{end_page} 页不匹配")
-
-    kept = [
-        dict(block) for block in original.get("blocks", [])
-        if not start_page <= int(block.get("page_no") or 0) <= end_page
-    ]
-    for index, block in enumerate(replacements, start=1):
-        raw_id = str(block.get("source_block_id") or block.get("block_id") or index).split(":")[-1]
-        block["source_block_id"] = raw_id
-        block["block_id"] = f"{role}:HYBRID-P{int(block.get('page_no') or 0):04d}-{index:04d}"
-    blocks = sorted(
-        [*kept, *replacements],
-        key=lambda block: (int(block.get("page_no") or 0), int(block.get("reading_order") or 0)),
-    )
-    for index, block in enumerate(blocks, start=1):
-        block["reading_order"] = index
-    merged = {**original, "blocks": blocks}
-    parser = dict(original.get("parser") or {})
-    parser.setdefault("localized_retries", []).append({
-        "backend": (partial.get("parser") or {}).get("backend"),
-        "effort": (partial.get("parser") or {}).get("effort"),
-        "pages": [start_page, end_page],
-    })
-    merged["parser"] = parser
-    merged.pop("quality_actions", None)
-    return merged
-
-
-def rank_legal_units(
-    units: list[dict[str, Any]], procurement_items: list[dict[str, Any]], top_k: int
-) -> list[dict[str, Any]]:
-    """按受控主题、同义词、条号引用和二元组相似度依次召回法规条款。"""
-    statements = [str(item.get("statement") or "") for item in procurement_items if item.get("statement")]
-    structured_topics = {
-        topic
-        for item in procurement_items
-        for topic in (
-            topic_keys(item.get("topics"))
-            or ({canonical_topic(item.get("requirement_type"))} if canonical_topic(item.get("requirement_type")) != "other" else set())
-        )
-    }
-    synonym_topics = {
-        topic
-        for statement in statements
-        for topic in topic_keys(dictionary_topics(statement))
-    } - structured_topics
-    ranked = []
-    for unit in units:
-        search_text = str(unit.get("search_text") or unit.get("text") or "")
-        unit_topics = topic_keys(unit.get("topics")) or topic_keys(dictionary_topics(search_text))
-        exact = bool(structured_topics & unit_topics)
-        synonym = bool(synonym_topics & unit_topics)
-        article = bool(unit.get("article_no") and any(str(unit["article_no"]) in statement for statement in statements))
-        fallback = max((similarity(search_text, statement) for statement in statements), default=0.0)
-        order = (int(exact), int(synonym), int(article), fallback)
-        if any(order):
-            ranked.append((order, unit, {
-                "topic_exact": sorted(structured_topics & unit_topics),
-                "topic_synonym": sorted(synonym_topics & unit_topics),
-                "article_reference": article,
-                "bigram_similarity": round(fallback, 4),
-            }))
-    ranked.sort(key=lambda item: item[0], reverse=True)
-    return [
-        {
-            **unit,
-            "retrieval_score": 4.0 if order[0] else 3.0 if order[1] else 2.0 if order[2] else round(order[3], 4),
-            "retrieval_signals": signals,
-        }
-        for order, unit, signals in ranked[:top_k]
-    ]
-
-
-def build_alignment_matrix(
-    baseline: list[dict[str, Any]], candidates: list[dict[str, Any]], target: str
-) -> list[dict[str, Any]]:
-    """为每个基准事项选择最相关候选，保留证据不足而不直接作最终判定。"""
-    matrix = []
-    for base in baseline:
-        ranked = sorted(
-            ((similarity(base.get("statement", ""), item.get("statement", "")), item) for item in candidates),
-            key=lambda pair: pair[0],
-            reverse=True,
-        )
-        score, best = ranked[0] if ranked else (0.0, None)
-        status = "candidate_found" if score >= 0.12 else "evidence_insufficient"
-        matrix.append(
-            {
-                "baseline_item_id": base.get("item_id"),
-                "baseline_statement": base.get("statement"),
-                f"{target}_item_id": best.get("item_id") if best and status == "candidate_found" else None,
-                f"{target}_statement": best.get("statement") if best and status == "candidate_found" else None,
-                "retrieval_score": round(score, 4),
-                "status": status,
-                "baseline_evidence_block_ids": base.get("evidence_block_ids", []),
-                "candidate_evidence_block_ids": best.get("evidence_block_ids", []) if best and status == "candidate_found" else [],
-            }
-        )
-    return matrix
-
-
-def deduplicate_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """按问题类型和标题去重，并合并可追溯ID。"""
-    unique: dict[tuple[str, str], dict[str, Any]] = {}
-    for raw in findings:
-        if not isinstance(raw, dict):
-            continue
-        item = dict(raw)
-        key = (str(item.get("finding_type") or ""), str(item.get("title") or "").strip())
-        if key not in unique:
-            unique[key] = item
-            continue
-        current = unique[key]
-        for field in ("evidence_block_ids", "legal_unit_ids", "rule_ids", "source_candidate_ids"):
-            current[field] = list(dict.fromkeys([*current.get(field, []), *item.get(field, [])]))
-    return list(unique.values())
-
-
-def collect_system_warnings(quality: dict[str, Any], extraction: dict[str, Any]) -> list[dict[str, Any]]:
-    """将解析、OCR和提取告警放入独立系统质量分栏。"""
-    warnings = [
-        {**finding, "review_scope": "system_quality"}
-        for report in quality.get("quality", {}).values()
-        for finding in report.get("quality_findings", [])
-    ] + [
-        {**finding, "review_scope": "system_quality"}
-        for finding in extraction.get("extraction_findings", [])
-    ]
-    return deduplicate_findings(warnings)

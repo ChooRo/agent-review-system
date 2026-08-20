@@ -1,4 +1,4 @@
-"""Probe an OpenAI-compatible endpoint for observable prefix-cache reuse."""
+"""探测 OpenAI 兼容端点是否存在可观测的前缀缓存复用。"""
 
 from __future__ import annotations
 

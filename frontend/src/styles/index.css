@@ -1,4 +1,4 @@
-/* ===== 厦门烟草采购AI平台 - Design Tokens & Global Styles ===== */
+ /* ===== 厦门烟草采购AI平台 - Design Tokens & Global Styles ===== */
 :root {
   --parchment: #f5f4ed; --ivory: #faf9f5; --white: #ffffff; --sand: #e8e6dc;
   --dark: #141413; --dark-surf: #30302e;
@@ -19,10 +19,10 @@ button:disabled { cursor: not-allowed; opacity: .45; pointer-events: none; }
 input, textarea, select { font-family: var(--sans); }
 a { color: inherit; text-decoration: none; }
 
-/* ===== App Shell ===== */
+ /* ===== App Shell ===== */
 .shell { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 
-/* ===== Header ===== */
+ /* ===== Header ===== */
 header {
   background: var(--dark); color: var(--ivory);
   padding: 0 22px; display: flex; align-items: center; justify-content: space-between;
@@ -56,7 +56,7 @@ header {
   padding: 3px 10px; border-radius: 20px; font-weight: 600; white-space: nowrap;
 }
 
-/* ===== Main Layout: Sidebar + Content ===== */
+ /* ===== Main Layout: Sidebar + Content ===== */
 .main { flex: 1; display: flex; min-height: 0; }
 .sidebar {
   width: 208px; flex: 0 0 auto; background: var(--ivory);
@@ -88,7 +88,7 @@ header {
   background: var(--ochre-soft); padding: 0 7px; border-radius: 20px; font-weight: 600;
 }
 
-/* ===== Content Area ===== */
+ /* ===== Content Area ===== */
 .content { flex: 1; overflow-y: auto; min-height: 0; display: flex; flex-direction: column; }
 .page-head {
   position: relative; padding: 18px 26px 14px; flex: 0 0 auto;
@@ -114,7 +114,7 @@ header {
   color: var(--ochre); font: 600 11px var(--sans);
 }
 
-/* ===== Buttons ===== */
+ /* ===== Buttons ===== */
 .btn {
   font-size: 12px; border: 1px solid var(--ring); background: var(--white);
   color: var(--ink2); padding: 6px 13px; border-radius: 8px; cursor: pointer;
@@ -131,7 +131,7 @@ header {
 }
 .link-btn:hover { text-decoration: underline; }
 
-/* ===== Stats ===== */
+ /* ===== Stats ===== */
 .stat-row { display: flex; gap: 14px; margin-bottom: 18px; }
 .stat {
   flex: 1; background: var(--white); border: 1px solid var(--border);
@@ -142,7 +142,7 @@ header {
 .stat .sl { font-size: 11.5px; color: var(--stone); margin-top: 3px; }
 .stat .sv.warn { color: var(--crimson); }
 
-/* ===== Tables ===== */
+ /* ===== Tables ===== */
 table.tbl {
   width: 100%; border-collapse: collapse; background: var(--white);
   border: 1px solid var(--border); border-radius: 13px; overflow: hidden;
@@ -160,7 +160,7 @@ table.tbl {
 .tbl tr:hover td { background: #fcfbf7; }
 .tname { font-weight: 600; color: var(--ink); }
 
-/* ===== Pills ===== */
+ /* ===== Pills ===== */
 .pill {
   font-size: 10.5px; padding: 2px 9px; border-radius: 20px;
   font-weight: 600; display: inline-block;
@@ -170,11 +170,11 @@ table.tbl {
 .pill.done { background: var(--green-soft); color: var(--green); }
 .pill.mode { background: var(--sand); color: var(--olive); }
 
-/* ===== Toolbar ===== */
+ /* ===== Toolbar ===== */
 .toolbar { display: flex; align-items: center; gap: 9px; margin-bottom: 14px; }
 .toolbar .sp { flex: 1; }
 
-/* ===== Cards ===== */
+ /* ===== Cards ===== */
 .card {
   border: 1px solid var(--border); border-radius: 12px; padding: 13px;
   margin-bottom: 12px; transition: all .4s; background: var(--ivory);
@@ -190,7 +190,7 @@ table.tbl {
 .card .ctitle { font-family: var(--serif); font-size: 14px; color: var(--ink); }
 .card .cbody { font-size: 12px; line-height: 1.7; color: var(--ink2); }
 
-/* ===== Project List ===== */
+ /* ===== Project List ===== */
 .project-list { display: flex; flex-direction: column; gap: 10px; }
 .project-list-row {
   display: grid; grid-template-columns: minmax(0, 1fr) 120px 100px auto;
@@ -205,7 +205,7 @@ table.tbl {
 .project-list-cell b { display: block; font-family: var(--serif); font-size: 18px; color: var(--ink); }
 .project-list-cell span { font-size: 10px; color: var(--stone); }
 
-/* ===== Subtask List ===== */
+ /* ===== Subtask List ===== */
 .subtask-list { padding: 0 20px 14px; }
 .subtask-list-page .subtask-row:first-child { border-top: 1px solid var(--border2); }
 .subtask-table-head, .subtask-row {
@@ -242,7 +242,7 @@ table.tbl {
 .project-progress b { display: block; font-family: var(--serif); font-size: 24px; color: var(--ink); }
 .project-progress span { font-size: 10px; color: var(--stone); }
 
-/* ===== Review Workbench - 3 Column ===== */
+ /* ===== Review Workbench - 3 Column ===== */
 .workbench-page {
   display: flex; flex-direction: column; overflow: hidden;
 }
@@ -292,7 +292,7 @@ table.tbl {
 .clause .clabel { font-family: var(--serif); font-size: 10.5px; color: var(--olive); margin-bottom: 4px; }
 .hl { background: #f3e2c4; padding: 0 3px; border-radius: 3px; color: var(--ink); }
 
-/* ===== Mode Bar ===== */
+ /* ===== Mode Bar ===== */
 .modebar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
 .modebar .ml { font-family: var(--serif); font-size: 13px; color: var(--ink); white-space: nowrap; }
 .modeseg { display: flex; gap: 8px; flex: 1; }
@@ -308,7 +308,7 @@ table.tbl {
 .mode-btn.on { border-color: var(--terra); background: var(--terra-soft); box-shadow: 0 0 0 1px var(--terra); }
 .mode-btn.on .fp { color: var(--terra); }
 
-/* ===== Review Actions Bar ===== */
+ /* ===== Review Actions Bar ===== */
 .review-actions {
   background: var(--white); border: 1px solid var(--border);
   border-radius: 12px; padding: 11px 14px; margin-bottom: 14px;
@@ -319,7 +319,7 @@ table.tbl {
 .review-actions .ra-t b { color: var(--ink); }
 .review-actions .sp { flex: 1; }
 
-/* ===== Evidence Viewer ===== */
+ /* ===== Evidence Viewer ===== */
 .evidence-viewer {
   display: grid; grid-template-columns: 116px minmax(0, 1fr);
   gap: 14px; height: 480px;
@@ -343,7 +343,7 @@ table.tbl {
 .scan-page h4 { text-align: center; font: 700 22px var(--serif); letter-spacing: 4px; margin-bottom: 28px; }
 .scan-page p { font: 15px var(--serif); line-height: 2; text-indent: 2em; }
 
-/* ===== Admin ===== */
+ /* ===== Admin ===== */
 .admin-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
 .admin-card {
   background: var(--white); border: 1px solid var(--border);
@@ -358,7 +358,7 @@ table.tbl {
   border-radius: 20px; padding: 2px 8px; font-weight: 700;
 }
 
-/* ===== Compare / Plans ===== */
+ /* ===== Compare / Plans ===== */
 .plan-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 22px; }
 .plan {
   background: var(--white); border: 1px solid var(--border);
@@ -382,7 +382,7 @@ table.tbl {
 }
 .radar-card h3 { font-size: 15px; margin-bottom: 6px; }
 
-/* ===== Knowledge Base ===== */
+ /* ===== Knowledge Base ===== */
 .tabs { display: flex; gap: 7px; margin-bottom: 16px; }
 .tab {
   font-size: 12px; padding: 6px 14px; border-radius: 9px;
@@ -422,7 +422,7 @@ table.tbl {
 .doc-meta-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
 .doc-meta-row .chip { font-size: 10px; }
 
-/* ===== Cases ===== */
+ /* ===== Cases ===== */
 .case {
   border: 1px solid var(--border); border-radius: 12px;
   padding: 13px 15px; margin-bottom: 10px; background: var(--white);
@@ -440,7 +440,7 @@ table.tbl {
 .rule.record-muted .chip, .rule.record-muted .rmeta > span:not(.btn) { opacity: .55; }
 .rule.record-muted .btn { opacity: 1; color: var(--ink); background: var(--white); border-color: var(--border); }
 
-/* ===== Permission Matrix ===== */
+ /* ===== Permission Matrix ===== */
 .matrix {
   width: 100%; border-collapse: collapse; background: var(--white);
   border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
@@ -458,7 +458,7 @@ table.tbl {
 .yes { color: var(--green); font-weight: 700; }
 .no { color: var(--ring); }
 
-/* ===== Task Type Options (create task modal) ===== */
+ /* ===== Task Type Options (create task modal) ===== */
 .task-type-grid {
   display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
 }
@@ -475,7 +475,7 @@ table.tbl {
 .task-type-option.locked { opacity: .5; cursor: not-allowed; background: repeating-linear-gradient(45deg, var(--ivory), var(--ivory) 9px, #f2f0e9 9px, #f2f0e9 18px); }
 .task-type-option.locked em { color: var(--stone); background: var(--sand); }
 
-/* ===== Progress ===== */
+ /* ===== Progress ===== */
 .progress { height: 7px; background: var(--sand); border-radius: 20px; overflow: hidden; }
 .progress i { position: relative; display: block; height: 100%; overflow: hidden; background: var(--terra); border-radius: inherit; transition: width .35s; }
 .progress.running i::after { position: absolute; inset: 0; content: ""; background: linear-gradient(105deg, transparent 20%, rgba(255,255,255,.72) 48%, transparent 76%); transform: translateX(-100%); animation: progress-scan 1.35s ease-in-out infinite; }
@@ -489,7 +489,7 @@ table.tbl {
 .step-dot.on { color: var(--terra); border-color: var(--terra); font-weight: 700; }
 .step-dot.done { color: var(--green); border-color: var(--green); }
 
-/* ===== Forms ===== */
+ /* ===== Forms ===== */
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field.full { grid-column: 1 / -1; }
@@ -516,7 +516,7 @@ table.tbl {
 .file-picker.selected em { background:var(--green); }
 .file-hint { margin-top:1px; }
 
-/* ===== Dropzone ===== */
+ /* ===== Dropzone ===== */
 .dropzone {
   border: 1.5px dashed var(--ring); border-radius: 12px;
   padding: 22px; text-align: center; color: var(--olive);
@@ -536,13 +536,13 @@ table.tbl {
 .upload-hint { font-size: 10px; color: var(--stone); line-height: 1.45; }
 .upload-file { font-size: 11px; font-weight: 600; color: var(--green); margin-top: 7px; word-break: break-all; }
 
-/* ===== Modal form footer ===== */
+ /* ===== Modal form footer ===== */
 .modal-foot {
   padding: 14px 20px; border-top: 1px solid var(--border);
   display: flex; justify-content: flex-end; gap: 9px;
 }
 
-/* ===== Empty / Locked / State ===== */
+ /* ===== Empty / Locked / State ===== */
 .empty {
   border: 1px dashed var(--ring); border-radius: 12px;
   padding: 28px; text-align: center; color: var(--stone);
@@ -575,7 +575,7 @@ table.tbl {
   border-radius: 10px; padding: 11px 13px; margin-top: 10px;
 }
 
-/* ===== Finding Nav (workbench middle column) ===== */
+ /* ===== Finding Nav (workbench middle column) ===== */
 .finding-nav-btn {
   display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px;
   width: 100%; padding: 9px 10px; border: 1px solid transparent; border-radius: 8px;
@@ -588,7 +588,7 @@ table.tbl {
 .finding-nav-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .risk-dot { width: 7px; height: 7px; margin-top: 4px; border-radius: 50%; flex: 0 0 auto; }
 
-/* ===== Annotation Bar ===== */
+ /* ===== Annotation Bar ===== */
 .anno-bar {
   margin-top: 10px; padding-top: 9px; border-top: 1px dashed var(--border2);
   display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
@@ -606,7 +606,7 @@ table.tbl {
 .anno-btn { padding: 3px 9px; font-size: 11px; }
 .anno-btn.on { border-color: var(--terra); background: var(--terra-soft); color: var(--terra); font-weight: 700; }
 
-/* ===== Compare Rows ===== */
+ /* ===== Compare Rows ===== */
 .cmp-intro {
   font-size: 11px; color: var(--olive); background: var(--ivory);
   border: 1px solid var(--border); border-radius: 9px;
@@ -641,7 +641,7 @@ table.tbl {
 .verdict.low { background: var(--ivory); color: var(--olive); }
 .verdict.pass { background: var(--green-soft); color: var(--green); }
 
-/* ===== Depth / Trace ===== */
+ /* ===== Depth / Trace ===== */
 .depth {
   margin-top: 8px; font-size: 10.5px; color: var(--green);
   font-weight: 600; display: flex; align-items: center; gap: 5px;
@@ -654,7 +654,7 @@ table.tbl {
 .trace .ti { font-size: 11px; color: var(--ink2); display: flex; align-items: center; gap: 6px; padding: 2px 0; }
 .trace .ti .ico { color: var(--terra); }
 
-/* ===== Progress Card ===== */
+ /* ===== Progress Card ===== */
 .progress-card { max-width: 720px; }
 .progress-card h2 { color: var(--ink); margin: 14px 0 5px; }
 .progress-card p { margin: 0; color: var(--stone); font-size: 12px; }
@@ -666,7 +666,7 @@ table.tbl {
 .timeline li.done { border-color: var(--terra); background: var(--terra-soft); color: var(--terra); font-weight: 600; }
 .timeline li.current { border-color: var(--ochre); background: var(--ochre-soft); color: var(--ochre); font-weight: 600; }
 
-/* ===== Task Row Actions ===== */
+ /* ===== Task Row Actions ===== */
 .task-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; white-space: nowrap; }
 .task-row-actions .btn { padding-left: 11px; padding-right: 11px; }
 .task-name-line { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
@@ -677,7 +677,7 @@ table.tbl {
 }
 .task-reminder.warn { background: var(--ochre-soft); color: var(--ochre); }
 
-/* ===== Filter ===== */
+ /* ===== Filter ===== */
 .filter-group { display: flex; gap: 5px; flex-wrap: wrap; }
 .filter-btn {
   border: 1px solid var(--border2); background: var(--white);
@@ -697,7 +697,7 @@ table.tbl {
   font: 500 11.5px var(--sans); outline: none; cursor: pointer;
 }
 
-/* ===== Future Tasks ===== */
+ /* ===== Future Tasks ===== */
 .future-tasks { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 20px; }
 .future-tasks span {
   padding: 9px; border: 1px dashed var(--border2); border-radius: 9px;
@@ -705,7 +705,7 @@ table.tbl {
   color: var(--stone); font-size: 12px;
 }
 
-/* ===== Audit ===== */
+ /* ===== Audit ===== */
 .audit { border-left: 2px solid var(--border2); padding-left: 16px; margin-left: 6px; }
 .audit-item {
   position: relative; margin-bottom: 14px; font-size: 11.5px;
@@ -717,7 +717,7 @@ table.tbl {
 }
 .audit-item b { color: var(--ink); }
 
-/* ===== Login Page ===== */
+ /* ===== Login Page ===== */
 .login-page {
   min-height: 100vh; display: grid;
   grid-template-columns: 1.25fr .75fr; align-items: center; gap: 8vw; padding: 8vw;
@@ -750,7 +750,7 @@ table.tbl {
 }
 .form-error { color: var(--crimson); margin: 0 0 8px; font-size: 12px; }
 
-/* ===== Responsive ===== */
+ /* ===== Responsive ===== */
 @media (max-width: 760px) {
   .login-page { grid-template-columns: 1fr; padding: 40px 22px; }
   .login-intro h1 { font-size: 38px; }

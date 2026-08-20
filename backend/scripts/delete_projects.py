@@ -1,4 +1,4 @@
-"""Safely remove explicitly selected test projects from the JSON development store."""
+"""安全地从 JSON 开发存储中删除明确选定的测试项目。"""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.core.config import get_settings
+from app.repositories.backend import get_review_repository
 from app.repositories.json_store import JsonStore
-from app.repositories.review_repository import ReviewRepository
 
 
 RUNNING_STATUSES = {"queued", "parsing", "reviewing"}
@@ -167,11 +167,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.list:
         if args.project_id:
             parser.error("--list cannot be combined with --project-id")
-        data_dir, _ = configured_paths(); list_projects(ReviewRepository(data_dir)); return 0
+        data_dir, _ = configured_paths(); list_projects(get_review_repository(data_dir)); return 0
     if not args.project_id:
         parser.error("provide --list or at least one exact --project-id")
     data_dir, uploads_dir = configured_paths()
-    repository = ReviewRepository(data_dir)
+    repository = get_review_repository(data_dir)
     try:
         plan = make_plan(repository.load(), set(args.project_id), uploads_dir)
         active = running_tasks(plan)

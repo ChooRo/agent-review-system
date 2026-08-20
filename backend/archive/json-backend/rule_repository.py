@@ -1,4 +1,4 @@
-"""JSON repository for executable rules; legal knowledge stays separate."""
+"""可执行规则的 JSON 仓储；法律知识保持独立。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ T = TypeVar("T")
 
 
 class RuleRepository:
-    """Persistence boundary for rule assets, their immutable snapshots, and audit."""
+    """规则资产、不可变快照及审计记录的持久化边界。"""
 
     def __init__(self, data_dir: Path) -> None:
         self.store = JsonStore(data_dir / "rules.json")
@@ -55,5 +55,5 @@ class RuleRepository:
         return results
 
     def applicable_rules(self, module: str) -> list[dict[str, Any]]:
-        """The review engine's only executable-rule query: published rules only."""
+        """审查引擎唯一的可执行规则查询：只查询已发布规则。"""
         return self.published(module)

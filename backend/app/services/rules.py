@@ -9,12 +9,12 @@ from fastapi import HTTPException
 
 from app.core.config import get_settings
 from app.policies import rules as rules_policy
-from app.repositories.rule_repository import RuleRepository
+from app.repositories.backend import get_rule_repository
 
 
 class RuleService:
     def __init__(self) -> None:
-        self.repository = RuleRepository(Path(get_settings().data_dir))
+        self.repository = get_rule_repository(Path(get_settings().data_dir))
 
     @staticmethod
     def _now() -> str:

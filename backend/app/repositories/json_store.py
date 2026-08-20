@@ -6,7 +6,7 @@ from typing import Any
 
 
 class JsonStore:
-    """Small atomic JSON repository used only by backend services."""
+    """仅供后端服务使用的小型原子 JSON 仓储。"""
 
     _lock = threading.RLock()  # ponytail: process-local lock; replace with DB transactions for multi-process deployment.
 

@@ -1,4 +1,4 @@
-"""Repository contract and JSON implementation for procurement-review business data."""
+"""采购审查业务数据的仓储契约和 JSON 实现。"""
 
 from pathlib import Path
 import threading
@@ -8,7 +8,7 @@ from app.repositories.json_store import JsonStore
 
 
 class ReviewRepository:
-    """Single business-data boundary; services never open JSON files directly."""
+    """唯一的业务数据边界；服务不会直接打开 JSON 文件。"""
 
     collections = ("projects", "tasks", "findings", "comments", "events", "audit", "idempotency")
     _lock = threading.RLock()
@@ -24,7 +24,7 @@ class ReviewRepository:
         self._store.write({"schema_version": 1, **{name: value.get(name, []) for name in self.collections}})
 
     def transaction(self, mutate) -> None:
-        """Commit related task/findings/audit changes as one atomic JSON replacement."""
+        """将相关任务、问题和审计变更作为一次原子 JSON 替换提交。"""
         with self._lock:
             state = self.load()
             mutate(state)
@@ -37,7 +37,7 @@ class ReviewRepository:
 
 
 class ReviewCollection:
-    """Compatibility-sized repository contract for one real business aggregate."""
+    """面向一个实际业务聚合的兼容型仓储契约。"""
 
     def __init__(self, repository: ReviewRepository, name: str) -> None:
         self.repository, self.name = repository, name

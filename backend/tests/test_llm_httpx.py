@@ -52,19 +52,16 @@ def test_llm_retries_only_transient_failures(tmp_path, monkeypatch, failure) -> 
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize("response", [
-    httpx.Response(400),
-    httpx.Response(200, json={"choices": [{"message": {"content": '{"answer":'}, "finish_reason": "length"}]}),
-])
-def test_llm_does_not_retry_permanent_or_json_failures(tmp_path, monkeypatch, response) -> None:
+def test_llm_does_not_retry_permanent_failures(tmp_path, monkeypatch) -> None:
     calls = []
 
     class Client:
         def __init__(self, **_kwargs): pass
         def post(self, path, json=None, headers=None, timeout=None):
             calls.append(path)
-            response.request = httpx.Request("POST", "https://example.test/v1/chat/completions")
-            return response
+            return httpx.Response(
+                400, request=httpx.Request("POST", "https://example.test/v1/chat/completions")
+            )
 
     monkeypatch.setattr("app.review_engine.services.llm.httpx.Client", Client)
     service = LLMService({"api_url": "https://example.test/v1", "api_key": "test-key", "model": "test-model", "max_retries": 1}, RunStore(tmp_path))
@@ -72,9 +69,33 @@ def test_llm_does_not_retry_permanent_or_json_failures(tmp_path, monkeypatch, re
     with pytest.raises(RuntimeError):
         service.json_call("no_retry", "return JSON", {})
     assert len(calls) == 1
-    if response.status_code == 200:
-        trace = json.loads(next((tmp_path / "llm_traces").glob("no_retry_*.json")).read_text(encoding="utf-8"))
-        assert trace["attempts"][0]["finish_reason"] == "length"
+
+
+def test_llm_retries_truncated_json_then_raises(tmp_path, monkeypatch) -> None:
+    calls = []
+
+    class Client:
+        def __init__(self, **_kwargs): pass
+        def post(self, path, json=None, headers=None, timeout=None):
+            calls.append(path)
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", "https://example.test/v1/chat/completions"),
+                json={"choices": [{"message": {"content": '{"answer":'}, "finish_reason": "length"}]},
+            )
+
+    monkeypatch.setattr("app.review_engine.services.llm.httpx.Client", Client)
+    service = LLMService({"api_url": "https://example.test/v1", "api_key": "test-key", "model": "test-model", "max_retries": 1}, RunStore(tmp_path))
+
+    with pytest.raises(RuntimeError):
+        service.json_call("no_retry", "return JSON", {})
+    assert len(calls) == 2
+    trace = json.loads(next((tmp_path / "llm_traces").glob("no_retry_*.json")).read_text(encoding="utf-8"))
+    assert trace["attempts"][0]["status"] == "failed"
+    assert trace["attempts"][0]["error_type"] == "JSONParseError"
+    assert trace["attempts"][0]["finish_reason"] == "length"
+    assert trace["attempts"][1]["status"] == "failed"
+    assert trace["attempts"][1]["error_type"] == "JSONParseError"
 
 
 def test_llm_streams_json_with_output_limit_and_batch_trace(tmp_path, monkeypatch) -> None:

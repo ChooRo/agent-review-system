@@ -1,4 +1,4 @@
-"""Legal evidence API plus the published executable-rule compatibility view."""
+"""法律证据 API 及已发布的可执行规则兼容视图。"""
 
 from typing import Annotated
 
@@ -62,7 +62,7 @@ def update_knowledge_document(document_key: str, payload: KnowledgeDocumentUpdat
 
 @router.post("/documents/{document_key}/extract-metadata")
 def extract_knowledge_metadata(document_key: str, user: CurrentUser, service: Service):
-    """Run evidence-bound AI extraction for the locally selected legal units."""
+    """对本地选定的法律单元执行绑定证据的 AI 提取。"""
     return service.extract_metadata(document_key, user)
 
 

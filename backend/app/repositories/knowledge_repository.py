@@ -1,4 +1,4 @@
-"""Repository boundary for legal evidence documents; executable rules stay separate."""
+"""法律证据文档的仓储边界；可执行规则保持独立。"""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ import re
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from app.repositories.backend import get_rule_repository
 from app.repositories.json_store import JsonStore
-from app.repositories.rule_repository import RuleRepository
 
 T = TypeVar("T")
 
@@ -20,7 +20,7 @@ class KnowledgeRepository:
 
     @staticmethod
     def _metadata(value: dict[str, Any], fallback_key: str = "") -> dict[str, Any]:
-        """Provide backward-compatible document metadata without rewriting old files."""
+        """提供向后兼容的文档元数据，不重写旧文件。"""
         doc = dict(value.get("legal_document", {}))
         extracted = value.get("metadata_extraction", {}).get("basic_information", {})
         candidate_title = str(doc.get("canonical_title") or extracted.get("canonical_title") or "")
@@ -119,10 +119,10 @@ class KnowledgeRepository:
             return result
 
     def applicable_rules(self, keyword: str | None = None) -> list[dict[str, Any]]:
-        """Return only published executable rules; legal units remain evidence, not rules."""
+        """仅返回已发布的可执行规则；法律单元仍是证据而不是规则。"""
         if self.rules_data_dir is None:
             return []
-        rules = RuleRepository(self.rules_data_dir).applicable_rules("procurement")
+        rules = get_rule_repository(self.rules_data_dir).applicable_rules("procurement")
         if not keyword:
             return rules
         term = keyword.lower()

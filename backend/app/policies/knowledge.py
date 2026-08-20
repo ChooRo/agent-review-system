@@ -1,4 +1,4 @@
-"""Legal-evidence document authorization."""
+"""法律证据文档授权。"""
 
 from typing import Any
 

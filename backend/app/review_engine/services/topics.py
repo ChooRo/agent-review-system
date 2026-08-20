@@ -1,4 +1,4 @@
-"""Shared controlled topics for procurement assertions and legal units."""
+"""采购断言和法律单元共用的受控主题。"""
 
 from __future__ import annotations
 

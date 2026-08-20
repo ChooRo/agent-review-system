@@ -1,4 +1,4 @@
-"""OpenAI-compatible LLM calls with JSON output validation."""
+"""带 JSON 输出校验的 OpenAI 兼容 LLM 调用。"""
 
 from __future__ import annotations
 
@@ -70,6 +70,8 @@ class LLMService:
         request_timeout = int(timeout_seconds or self.timeout_seconds)
         idle_timeout = int(idle_timeout_seconds or request_timeout)
         total_timeout = int(total_timeout_seconds or request_timeout)
+        content = ""
+        finish_reason = None
         try:
             for attempt in range(retries + 1):
                 try:
@@ -86,6 +88,15 @@ class LLMService:
                         choice = response.json()["choices"][0]
                         content = choice["message"].get("content") or ""
                         finish_reason = choice.get("finish_reason")
+                    if finish_reason == "length":
+                        attempts.append({
+                            "attempt": attempt + 1,
+                            "status": "truncated",
+                            "received_characters": len(content),
+                            "finish_reason": finish_reason,
+                        })
+                        raise OutputLengthExceeded("模型输出达到 max_tokens 上限，本批内容不完整")
+                    result = parse_json_object(content)
                     attempts.append({
                         "attempt": attempt + 1,
                         "status": "completed",
@@ -110,8 +121,31 @@ class LLMService:
                     })
                     if attempt >= retries:
                         raise
+                except ValueError:
+                    # 网关中途掐流导致的 JSON 截断/格式错误与瞬态网络错误同等对待，重试一次。
+                    attempts.append({
+                        "attempt": attempt + 1,
+                        "status": "failed",
+                        "error_type": "JSONParseError",
+                        "received_characters": len(content),
+                        "finish_reason": finish_reason,
+                    })
+                    if attempt >= retries:
+                        raise
+                except RuntimeError as exc:
+                    if isinstance(exc, (OutputLengthExceeded, JsonGuardAbort)):
+                        # 两者都是确定性内容级失败：截断/守卫掐断在同一输入下会原样重演，重试无意义，直接上抛交缩批。
+                        raise
+                    # 网关在流中途返回其它错误事件，与本批输入无关，属瞬态，按可重试处理。
+                    attempts.append({
+                        "attempt": attempt + 1,
+                        "status": "failed",
+                        "error_type": "GatewayStreamError",
+                        "message": str(exc),
+                    })
+                    if attempt >= retries:
+                        raise
                 time.sleep(min(2**attempt, 8) + random.random())
-            result = parse_json_object(content)
             write_json(trace_path, {
                 "step": step,
                 "request": request_body,
@@ -135,7 +169,7 @@ class LLMService:
     def _stream_content(
         self, request_body: dict[str, Any], idle_timeout: int, total_timeout: int
     ) -> tuple[str, str | None]:
-        """Collect OpenAI-compatible SSE chunks; incomplete streams are never parsed or admitted."""
+        """收集 OpenAI 兼容的 SSE 分块；不完整的流永远不会被解析或接收。"""
         chunks: list[str] = []
         finish_reason = None
         started = time.monotonic()
@@ -163,6 +197,16 @@ class LLMService:
                 if text == "[DONE]":
                     break
                 event = json.loads(text)
+                if isinstance(event, dict) and event.get("error"):
+                    err = event["error"]
+                    if _is_json_guard_abort(err):
+                        # 网关 JSON 守卫：检测到产出开始变非法 JSON 即中途掐断。同输入同输出，重试无意义。
+                        raise JsonGuardAbort(
+                            "gateway stream error: " + json.dumps(err, ensure_ascii=False)
+                        )
+                    raise RuntimeError(
+                        "gateway stream error: " + json.dumps(event["error"], ensure_ascii=False)
+                    )
                 choice = (event.get("choices") or [{}])[0]
                 if choice.get("finish_reason") is not None:
                     finish_reason = str(choice["finish_reason"])
@@ -172,6 +216,19 @@ class LLMService:
                 if content:
                     chunks.append(str(content))
         return "".join(chunks), finish_reason
+
+
+class OutputLengthExceeded(RuntimeError):
+    """模型输出达到 max_tokens 上限被截断，返回内容不完整，交上层缩批重提。"""
+
+
+class JsonGuardAbort(RuntimeError):
+    """网关 JSON 守卫在中途掐断生成（invalid_parameter_error）。同输入下产出确定，重试无意义，交上层缩批重提。"""
+
+
+def _is_json_guard_abort(err: dict[str, Any]) -> bool:
+    """判定网关流错误是否为 JSON 守卫掐断（产出变非法 JSON 被中止）。"""
+    return "Model output became abnormal" in str(err.get("message", ""))
 
 
 def parse_json_object(content: Any) -> dict[str, Any]:
@@ -188,3 +245,18 @@ def parse_json_object(content: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("LLM response JSON is not an object")
     return value
+
+
+if __name__ == "__main__":
+    guard = {
+        "message": "<400> InternalError.Algo.InvalidParameter: Model output became abnormal "
+                   "while generating a JSON response for response_format. The generation was aborted.",
+        "type": "invalid_request_error", "param": None, "code": "invalid_parameter_error",
+    }
+    assert _is_json_guard_abort(guard) is True, "守卫载荷应判定为守卫掐断"
+    assert _is_json_guard_abort({"message": "upstream connect error", "code": 503}) is False, "瞬态错误不应判定为守卫"
+    try:
+        raise RuntimeError("LLM call failed") from JsonGuardAbort("gateway stream error: x")
+    except RuntimeError as exc:
+        assert isinstance(exc.__cause__ or exc, (OutputLengthExceeded, JsonGuardAbort)), "cause 链应命中 workflow 的缩批触发元组"
+    print("LLM_GUARD_SELFCHECK_OK")

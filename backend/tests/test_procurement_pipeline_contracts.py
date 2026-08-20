@@ -1,13 +1,26 @@
 import json
 from pathlib import Path
 
-from app.review_engine.services.procurement.batching import BatchAssembler, BatchBudget, BatchValidator, LogicalUnitBuilder, token_estimate
+from app.review_engine.services.procurement.batching import (
+    BatchAssembler, BatchBudget, BatchValidator, LogicalUnitBuilder,
+    rows_html, table_business_view, table_rows, token_estimate,
+)
 from app.review_engine.services.procurement.evidence import EvidenceValidationService
 from app.review_engine.services.procurement.ledger import LedgerService
-from app.review_engine.services.procurement.quality import QualityCheckService
+from app.review_engine.services.procurement.quality import (
+    QualityCheckService,
+    supplement_damaged_table_text,
+    table_content_quality_flags,
+)
+from app.review_engine.services.procurement.candidates import (
+    collect_system_warnings, deterministic_hard_facts, extraction_batch_payload,
+    merge_candidate_items, validate_candidate_items,
+)
+from app.review_engine.services.procurement.structure import (
+    deterministic_references, structure_context_for_blocks,
+)
 from app.review_engine.services.procurement.workflow import (
-    PROCUREMENT_EXTRACTION_CONTRACT, REVIEW_TOPICS, WorkflowEngine, collect_system_warnings, deterministic_hard_facts, merge_candidate_items,
-    deterministic_references, structure_context_for_blocks, validate_candidate_items,
+    PROCUREMENT_EXTRACTION_CONTRACT, REVIEW_TOPICS, WorkflowEngine,
 )
 
 
@@ -107,6 +120,122 @@ def test_quality_prepare_excludes_empty_and_repeated_edge_noise() -> None:
     assert excluded.isdisjoint(logical["block_owner"])
 
 
+def test_table_rows_preserve_line_breaks_and_business_provenance() -> None:
+    block = {
+        "block_id": "T-1", "block_type": "table", "page_no": 3,
+        "source": {"table_html": (
+            "<table><tr><th>类别</th><th>评审标准</th></tr>"
+            "<tr><td rowspan='2'>技术评审</td><td>第一项<br>第二项</td></tr>"
+            "<tr><td>第三项</td></tr></table>"
+        )},
+    }
+    rows = table_rows(block)
+    assert rows[1]["cells"][1] == "第一项\n第二项"
+    assert rows[2]["cells"] == ["技术评审", "第三项"]
+    assert rows[2]["inherited_columns"] == [0]
+    view = table_business_view(block)
+    assert view["records"][1]["values"] == {"类别": "技术评审", "评审标准": "第三项"}
+    assert view["source"] == {"block_id": "T-1", "page": 3}
+    assert view["records"][1]["inherited_columns"] == [0]
+    assert view["structure_confidence"] == 0.8
+    assert "第一项<br>第二项" in rows_html(rows[:1], rows[1:2])
+
+
+def test_table_rows_keeps_continuation_rows_with_omitted_trailing_cells() -> None:
+    block = {
+        "block_id": "procurement:B-1",
+        "source": {"table_html": (
+            "<table><tr><th rowspan='2'>类别</th><th>项目</th><th>标准</th></tr>"
+            "<tr><td>服务</td><td>须提供承诺函</td></tr>"
+            "<tr><td colspan='2'>续表内容</td></tr></table>"
+        )},
+    }
+
+    rows = table_rows(block)
+
+    assert [len(row["cells"]) for row in rows] == [3, 3, 3]
+    assert rows[-1]["cells"] == ["续表内容", "", ""]
+
+
+def test_ai_payload_uses_business_table_json_instead_of_duplicate_flat_text() -> None:
+    payload = extraction_batch_payload("procurement", [{
+        "block_id": "T-1", "block_type": "table", "page_no": 3, "role": "primary",
+        "text": "类别 | 分值\n技术 | 4", "heading_path": ["评审标准"],
+        "table_html": "<table><tr><th>类别</th><th>分值</th></tr><tr><td>技术</td><td>4</td></tr></table>",
+    }])
+    block = payload["blocks"][0]
+    assert "tbl" in block and "x" not in block
+    assert block["tbl"]["records"][0]["values"] == {"类别": "技术", "分值": "4"}
+
+
+def test_suspicious_table_text_and_missing_item_breaks_trigger_retry() -> None:
+    block = {
+        "block_id": "T-BAD", "block_type": "table", "page_no": 1,
+        "text": "采购人发出澄清或者修截改的止时间和发方式",
+        "source": {"table_html": (
+            "<table><tr><th>内容</th></tr><tr><td>采购人发出澄清或者修截改的止时间和发方式"
+            "（1）事项一（2）事项二（3）事项三</td></tr></table>"
+        )},
+    }
+    flags = table_content_quality_flags(block)
+    assert {"suspected_inserted_character", "suspected_missing_character"} <= set(flags)
+    report = QualityCheckService().check(document([block]))
+    assert report["status"] == "retryable"
+    assert any(issue["code"] == "TABLE_CONTENT_QUALITY" for issue in report["issues"])
+
+
+def test_content_warning_keeps_structured_table_for_review_with_warning() -> None:
+    block = {
+        "block_id": "T-RETAIN", "block_type": "table", "page_no": 1,
+        "text": "采购人发出修截改的止时间和发方式",
+        "source": {"table_html": (
+            "<table><tr><th>条款号</th><th>编列内容</th></tr>"
+            "<tr><td>2.4.2</td><td>采购人发出修截改的止时间和发方式</td></tr></table>"
+        )},
+    }
+    checker = QualityCheckService()
+    prepared_document = document([block])
+    report = checker.check(prepared_document)
+    report = checker.degrade_to_review(prepared_document, report)
+    retained = prepared_document["blocks"][0]
+    assert retained["block_type"] == "table"
+    assert retained["quality_reason"] == "table_content_degraded"
+    assert any(item["action"] == "retained_with_quality_warning" for item in report["actions"])
+
+
+def test_native_table_fallback_skips_structured_content_warning(tmp_path: Path) -> None:
+    structured = {
+        "block_id": "T-STRUCTURED", "block_type": "table", "page_no": 13,
+        "source": {"table_html": (
+            "<table><tr><th>条款号</th><th>编列内容</th></tr>"
+            "<tr><td>2.4.2</td><td>修截改的止时间和发方式</td></tr></table>"
+        )},
+    }
+    broken = {
+        "block_id": "T-BROKEN", "block_type": "table", "page_no": 14,
+        "text": "表格内容缺失",
+    }
+
+    class FakeMinerU:
+        def __init__(self) -> None:
+            self.pages: set[int] | None = None
+
+        def supplement_native_pdf_pages(self, document, source, pages, *, reason):
+            self.pages = set(pages)
+
+    mineru = FakeMinerU()
+    supplement_damaged_table_text(
+        mineru,
+        document([structured, broken]),
+        tmp_path / "source.pdf",
+        {"issues": [
+            {"code": "TABLE_CONTENT_QUALITY", "block_ids": ["T-STRUCTURED"]},
+            {"code": "TABLE_CONTENT_QUALITY", "block_ids": ["T-BROKEN"]},
+        ]},
+    )
+    assert mineru.pages == {14}
+
+
 def test_attachment_target_may_be_a_paragraph_block() -> None:
     report = QualityCheckService().check(document([
         {"block_id": "B-1", "block_type": "paragraph", "text": "详细清单详见附件一。", "page_no": 1},
@@ -146,6 +275,85 @@ def test_table_structure_failure_retries_with_high_effort_hybrid(tmp_path: Path)
         "parse_method": "auto", "backend": "hybrid-engine", "effort": "high",
         "start_page_id": 0, "end_page_id": 0,
     }]
+
+
+def test_empty_table_routes_directly_to_page_ocr(tmp_path: Path) -> None:
+    skills = Path(__file__).parents[1] / "app" / "review_engine" / "skills.json"
+    engine = WorkflowEngine(tmp_path / "runs", skills)
+    bad = document([{
+        "block_id": "T-1", "block_type": "table", "text": "", "page_no": 1,
+        "reading_order": 1, "source": {},
+    }])
+    engine._previous = lambda _store, _step: {"documents": {"procurement": bad}}
+    calls = []
+
+    class Store:
+        run_dir = tmp_path
+        @staticmethod
+        def event(*_args, **_kwargs): return None
+        @staticmethod
+        def write_artifact(*_args, **_kwargs): return None
+
+    class MinerU:
+        backend = "pipeline"
+        effort = "medium"
+        @staticmethod
+        def parse(*_args, **kwargs):
+            calls.append(kwargs)
+            return document([{
+                "block_id": "O-1", "block_type": "paragraph",
+                "text": "采购人发出询比文件修改的截止时间和发布方式。",
+                "page_no": 1, "reading_order": 1,
+            }])
+
+    result = engine._quality_check(
+        Store(), {"documents": {"procurement": str(tmp_path / "input.pdf")}}, None, MinerU()
+    )
+    report = result["quality"]["procurement"]
+    assert report["status"] == "passed"
+    assert [call["parse_method"] for call in calls] == ["ocr"]
+    assert report["retry"]["attempts"][0]["accepted"] is True
+
+
+def test_structure_only_table_uses_hybrid_then_ocr_if_needed(tmp_path: Path) -> None:
+    skills = Path(__file__).parents[1] / "app" / "review_engine" / "skills.json"
+    engine = WorkflowEngine(tmp_path / "runs", skills)
+    bad = document([{
+        "block_id": "T-1", "block_type": "table",
+        "text": "\n".join(f"{index} | {'技术参数' * 25}" for index in range(20)),
+        "page_no": 1, "reading_order": 1, "source": {},
+    }])
+    engine._previous = lambda _store, _step: {"documents": {"procurement": bad}}
+    calls = []
+
+    class Store:
+        run_dir = tmp_path
+        @staticmethod
+        def event(*_args, **_kwargs): return None
+        @staticmethod
+        def write_artifact(*_args, **_kwargs): return None
+
+    class MinerU:
+        backend = "pipeline"
+        effort = "medium"
+        @staticmethod
+        def parse(*_args, **kwargs):
+            calls.append(kwargs)
+            if kwargs["parse_method"] == "auto":
+                return document([{
+                    "block_id": "H-1", "block_type": "header", "text": "项目名称",
+                    "page_no": 1, "reading_order": 1,
+                }])
+            return document([{
+                "block_id": "O-1", "block_type": "paragraph", "text": "完整表格正文。",
+                "page_no": 1, "reading_order": 1,
+            }])
+
+    result = engine._quality_check(
+        Store(), {"documents": {"procurement": str(tmp_path / "input.pdf")}}, None, MinerU()
+    )
+    assert result["quality"]["procurement"]["status"] == "passed"
+    assert [call["parse_method"] for call in calls] == ["auto", "ocr"]
 
 
 def test_unrecoverable_table_becomes_unknown_finding_without_blocking(tmp_path: Path) -> None:
@@ -267,8 +475,8 @@ def test_article_boundary_table_exit_and_attachment_exit_are_deterministic() -> 
 
     attachment_blocks = [
         {"block_id": "A-1", "block_type": "heading", "heading_level": 1, "heading_path": ["附件一"], "text": "附件一 报价表", "page_no": 1, "reading_order": 1},
-        {"block_id": "A-2", "block_type": "heading", "heading_level": 2, "heading_path": ["附件一", "填写说明"], "text": "填写说明", "page_no": 1, "reading_order": 2},
-        {"block_id": "A-3", "block_type": "paragraph", "heading_path": ["附件一", "填写说明"], "text": "请据实填写。", "page_no": 1, "reading_order": 3},
+        {"block_id": "A-2", "block_type": "heading", "heading_level": 1, "heading_path": ["附件一"], "text": "一、填写说明", "page_no": 1, "reading_order": 2},
+        {"block_id": "A-3", "block_type": "paragraph", "heading_path": ["附件一"], "text": "请据实填写。", "page_no": 1, "reading_order": 3},
         {"block_id": "A-4", "block_type": "heading", "heading_level": 1, "heading_path": ["其他事项"], "text": "其他事项", "page_no": 2, "reading_order": 4},
     ]
     attachment_manifest = LogicalUnitBuilder().build(document(attachment_blocks))
@@ -363,6 +571,11 @@ def test_cross_page_table_blocks_split_rows_without_changing_evidence_ids() -> N
     assert {block["block_id"] for block in fragments} == {"T-1", "T-2"}
     assert len({block["table_fragment"]["fragment_id"] for block in fragments}) == len(fragments)
     assert all(batch["table_row_count"] <= 2 for batch in batches["batches"])
+    continuation = [
+        block for batch in batches["batches"] for block in batch["blocks"]
+        if block.get("role") == "repeated_context" and block.get("table_fragment", {}).get("continuation_context")
+    ]
+    assert continuation and continuation[0]["table_fragment"]["source_block_id"] == "T-1"
 
 
 def test_indivisible_oversized_table_row_remains_a_hard_error() -> None:

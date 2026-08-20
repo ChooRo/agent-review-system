@@ -10,11 +10,11 @@ from typing import Any
 
 from fastapi import HTTPException, UploadFile
 
-from app.core.auth_store import AuthStore
+from app.core.auth_store import get_auth_store
 from app.core.config import get_settings
 from app.policies import common as common_policy
 from app.policies import review as review_policy
-from app.repositories.review_repository import ReviewRepository
+from app.repositories.backend import get_review_repository
 import threading
 import json
 
@@ -32,10 +32,10 @@ def fail(code: int, detail: str) -> None: raise HTTPException(code, detail)
 class ProcurementReviewService:
     def __init__(self) -> None:
         root = Path(get_settings().data_dir)
-        self.repository = ReviewRepository(root)
+        self.repository = get_review_repository(root)
         self.projects, self.tasks, self.findings = (self.repository.collection("projects"), self.repository.collection("tasks"), self.repository.collection("findings"))
         self.events_store, self.comments, self.audit, self.keys = (self.repository.collection("events"), self.repository.collection("comments"), self.repository.collection("audit"), self.repository.collection("idempotency"))
-        self.auth = AuthStore()
+        self.auth = get_auth_store()
 
     def create_project(self, payload: dict[str, Any], user: dict, key: str | None) -> dict:
         self._role(user, "operator"); replay = self._replay(key)
@@ -76,7 +76,7 @@ class ProcurementReviewService:
         primary = next((x for x in self.auth._read()["users"] if review_policy.can_be_primary_supervisor(x)), None)
         if not primary: fail(500, "未配置采购部门主责监督")
         collaborators = [x for x in self.auth._read()["users"] if x["id"] in payload["collaborative_supervisor_ids"] and review_policy.can_be_collaborative_supervisor(x) and x["id"] != primary["id"]]
-        item = {"id": uid("prt"), "project_id": project_id, "title": payload["title"], "status": "draft", "operator_id": user["id"], "members": [{"user_id": user["id"], "task_role": "operator", "department": user["department"], "module_scope": ["procurement"]}, {"user_id": primary["id"], "task_role": "primary_supervisor", "department": primary["department"], "module_scope": ["procurement"]}] + [{"user_id": x["id"], "task_role": "collaborative_supervisor", "department": x["department"], "module_scope": ["procurement"]} for x in collaborators], "document": None, "document_versions": [], "final_baseline": None, "engine_run_id": None, "created_at": now(), "updated_at": now(), "version": 1}
+        item = {"id": uid("prt"), "project_id": project_id, "title": payload["title"], "status": "draft", "operator_id": user["id"], "progress": 0, "members": [{"user_id": user["id"], "task_role": "operator", "department": user["department"], "module_scope": ["procurement"]}, {"user_id": primary["id"], "task_role": "primary_supervisor", "department": primary["department"], "module_scope": ["procurement"]}] + [{"user_id": x["id"], "task_role": "collaborative_supervisor", "department": x["department"], "module_scope": ["procurement"]} for x in collaborators], "document": None, "document_versions": [], "final_baseline": None, "engine_run_id": None, "created_at": now(), "updated_at": now(), "version": 1}
         tasks["items"].append(item); self.tasks.write(tasks); project["task_ids"].append(item["id"]); project["version"] += 1; self.projects.write(projects); self._event(item, user, None, "draft", "任务已创建"); return self._remember(key, self._task_out(item, user))
 
     def tasks_for_project(self, project_id: str, user: dict) -> list[dict]: self._expire_stalled_tasks(); self._project(project_id, user); return [self._task_out(x, user) for x in self.tasks.read()["items"] if x["project_id"] == project_id]
@@ -90,7 +90,7 @@ class ProcurementReviewService:
         return rows
 
     def debug_traces(self, project_id: str, task_id: str, user: dict) -> dict[str, Any]:
-        """Return a read-only, redacted view of one task's AI execution trace."""
+        """返回单个任务 AI 执行轨迹的只读脱敏视图。"""
         self._expire_stalled_tasks()
         task, _ = self._task(project_id, task_id)
         self._task_access(task, user)
@@ -178,9 +178,8 @@ class ProcurementReviewService:
                     })
                 item["batches"] = batches
             results.append(item)
-        # Map persisted engine artifacts to the business process shown in the UI.
-        # Several named steps intentionally share one artifact until the engine
-        # begins persisting them independently.
+        # 将持久化的引擎产物映射到界面展示的业务流程。
+        # 在引擎开始分别持久化之前，多个命名步骤会有意共用同一个产物。
         by_key = {item["key"]: item for item in results}
         process = [
             ("parse_documents", "mineru_parse"),
@@ -278,7 +277,7 @@ class ProcurementReviewService:
         task["document"] = document; task.setdefault("document_versions", []).append(document); task["version"] += 1; task["updated_at"] = now(); self.tasks.write(data); self._audit(user, "document_uploaded", task_id); return self._task_out(task, user)
 
     def upload_rectification(self, project_id: str, task_id: str, file: UploadFile, user: dict) -> dict:
-        """Append an immutable rectification version after the formal first review."""
+        """正式首次审查后追加不可变的整改版本。"""
         task, data = self._task(project_id, task_id); self._operator(task, user)
         if task.get("final_baseline"): fail(409, "采购文件终版已锁定")
         if task["status"] != "completed": fail(409, "仅已完成正式复核的任务可上传整改版")
@@ -320,7 +319,7 @@ class ProcurementReviewService:
         return outcome
 
     def _run_review_workflow_with_heartbeat(self, project_id: str, task_id: str, doc_path: str, engine_run_id: str | None, task_context: dict) -> None:
-        """Keep a durable heartbeat while the worker performs long parser/LLM calls."""
+        """工作进程执行耗时的解析器或 LLM 调用时，持续写入可靠的心跳。"""
         stopped = threading.Event()
 
         def heartbeat() -> None:
@@ -359,15 +358,22 @@ class ProcurementReviewService:
         timeout = get_settings().review_task_timeout_seconds
         cutoff = datetime.now(UTC).timestamp() - timeout
 
+        def stale(task: dict) -> bool:
+            if task.get("status") not in {"queued", "parsing", "reviewing"}:
+                return False
+            try:
+                updated = datetime.fromisoformat(task["updated_at"].replace("Z", "+00:00")).timestamp()
+            except (KeyError, TypeError, ValueError):
+                updated = 0
+            return updated < cutoff
+
+        # 绝大多数请求没有超时任务；先只读判断，避免每次页面加载都触发全量读改写。
+        if not any(stale(t) for t in self.tasks.read()["items"]):
+            return
+
         def persist(state: dict) -> None:
             for task in state["tasks"]:
-                if task.get("status") not in {"queued", "parsing", "reviewing"}:
-                    continue
-                try:
-                    updated = datetime.fromisoformat(task["updated_at"].replace("Z", "+00:00")).timestamp()
-                except (KeyError, TypeError, ValueError):
-                    updated = 0
-                if updated >= cutoff:
+                if not stale(task):
                     continue
                 task["status"] = "failed"
                 task["error"] = "审查任务心跳超时，可能因服务重启或后台进程中断。请重新发起审查。"
@@ -600,6 +606,12 @@ class ProcurementReviewService:
         if document: document = {k: v for k, v in document.items() if k != "path"}
         document_versions = [{k: v for k, v in item.items() if k != "path"} for item in task.get("document_versions", [])]
         output = {key: value for key, value in task.items() if key != "execution" + "_mode"}
-        return {**output, "document": document, "document_versions": document_versions, "finding_summary": summary, "progress": task.get("progress", 0), "task_role": role["task_role"] if role else None, "module_scope": role["module_scope"] if role else [], "quality": task.get("quality", {"status": "pending"}), "system_warnings": task.get("system_warnings", []), "coverage_matrix": task.get("coverage_matrix", []), "legal_facts": task.get("legal_facts", {}), "legal_applicability": task.get("legal_applicability", []), "legal_context_freeze": task.get("legal_context_freeze", []), "legal_applicability_confirmations": task.get("legal_applicability_confirmations", {}), "error": task.get("error")}
+        # 未生成报告时列值为 None（JSON 时代键不存在），统一回落默认，避免响应校验报错。
+        for key, default in (("quality", {"status": "pending"}), ("system_warnings", []), ("coverage_matrix", []),
+                             ("legal_facts", {}), ("legal_applicability", []), ("legal_context_freeze", []),
+                             ("degraded_steps", []), ("legal_applicability_confirmations", {})):
+            value = task.get(key)
+            output[key] = value if value is not None else default
+        return {**output, "document": document, "document_versions": document_versions, "finding_summary": summary, "progress": task.get("progress", 0), "task_role": role["task_role"] if role else None, "module_scope": role["module_scope"] if role else [], "error": task.get("error")}
     def _project_out(self, project: dict, user: dict, tasks: list[dict]) -> dict:
         return {**project, "task_summaries": [self._task_out(x, user) for x in tasks]}

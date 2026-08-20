@@ -1,4 +1,4 @@
-"""Executable-rule authorization."""
+"""可执行规则授权。"""
 
 from typing import Any
 

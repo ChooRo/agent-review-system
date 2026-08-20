@@ -4,6 +4,9 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from app.repositories.postgres.db import ConcurrentWriteError
 
 from app.api.auth import router as auth_router
 from app.api.procurement_reviews import router as procurement_reviews_router
@@ -58,6 +61,10 @@ def create_app() -> FastAPI:
     app.include_router(procurement_reviews_router, prefix=settings.api_prefix)
     app.include_router(knowledge_router, prefix=settings.api_prefix)
     app.include_router(rules_router, prefix=settings.api_prefix)
+
+    @app.exception_handler(ConcurrentWriteError)
+    async def concurrent_write_handler(_: Request, exc: ConcurrentWriteError):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     @app.get("/health", tags=["system"])
     def health() -> dict:

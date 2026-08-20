@@ -126,7 +126,24 @@ function safeTableHtml(value: unknown) {
   document.querySelectorAll('*').forEach((node) => [...node.attributes].forEach((attribute) => {
     if (!['rowspan', 'colspan'].includes(attribute.name.toLowerCase())) node.removeAttribute(attribute.name)
   }))
-  return document.querySelector('table')?.outerHTML || ''
+  const table = document.querySelector('table')
+  if (!table) return ''
+  const header = [...table.querySelectorAll(':scope > tr, :scope > tbody > tr')].find((row) => {
+    const text = row.textContent?.replace(/\s+/g, '') || ''
+    return text.includes('条款号') && text.includes('条款名称') && text.includes('编列内容')
+  })
+  if (header && header.parentElement?.tagName !== 'THEAD') {
+    const thead = document.createElement('thead')
+    header.querySelectorAll(':scope > td').forEach((cell) => {
+      const th = document.createElement('th')
+      for (const attribute of [...cell.attributes]) th.setAttribute(attribute.name, attribute.value)
+      th.innerHTML = cell.innerHTML
+      cell.replaceWith(th)
+    })
+    thead.append(header)
+    table.prepend(thead)
+  }
+  return table.outerHTML
 }
 function taskFacts(item: { evidence?: { task_facts?: Record<string, unknown[]> } }) {
   return Object.entries(item.evidence?.task_facts ?? {}).flatMap(([field, values]) => (values?.length ? [`${factLabel(field)}：${values.map(sourceFactValue).join('；')}`] : []))

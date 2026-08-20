@@ -1,4 +1,4 @@
-"""Safely delete explicitly selected tasks from the JSON development store."""
+"""安全地从 JSON 开发存储中删除明确选定的任务。"""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.core.config import get_settings
+from app.repositories.backend import get_review_repository
 from app.repositories.json_store import JsonStore
-from app.repositories.review_repository import ReviewRepository
 from scripts.delete_projects import CleanupError, contains_id, validate_deleted
 
 RUNNING_STATUSES = {"queued", "parsing", "reviewing"}
@@ -84,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--force", action="store_true", help="Allow deletion of running tasks.")
     args = parser.parse_args(argv)
     data_dir = configured_data_dir()
-    repository = ReviewRepository(data_dir)
+    repository = get_review_repository(data_dir)
     if args.list:
         if args.task_id:
             parser.error("--list cannot be combined with --task-id")

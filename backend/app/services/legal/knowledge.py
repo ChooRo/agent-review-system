@@ -118,8 +118,8 @@ class KnowledgeService:
         path, knowledge = found
         document_path = path.parent / "document.json"
         document = JsonStore(document_path).read() if document_path.is_file() else {"blocks": []}
-        # Rebuild local candidates on every explicit run. This also recovers a
-        # persisted `processing` state left by a stopped server or browser.
+        # 每次明确执行时都重新构建本地候选项，同时恢复因服务器或浏览器停止而遗留的
+        # 持久化 `processing` 状态。
         extraction = prepare_metadata_extraction(knowledge, document)
         candidate_ids = set(extraction.get("candidate_unit_ids", []))
         candidates = [unit for unit in knowledge.get("units", []) if unit.get("legal_unit_id") in candidate_ids]
@@ -194,7 +194,7 @@ class KnowledgeService:
             task.update({"_source": source, "_output_dir": output_dir, "_suffix": suffix, "_metadata": metadata, "_user": user, "_settings": settings, "_repository": self.repository})
             with self._tasks_lock:
                 self._tasks[task_id] = task
-            # The worker owns this directory for the lifetime of the task.
+            # 任务存续期间，该目录由工作进程负责管理。
             self._executor.submit(self._run_upload_task, task_id, source, output_dir, suffix, metadata, user, settings, self.repository)
             return {"task_id": task_id, **(self.task(task_id) or {})}
         except HTTPException:
@@ -202,7 +202,7 @@ class KnowledgeService:
         except Exception as exc:
             raise HTTPException(502, f"legal document upload failed: {type(exc).__name__}") from exc
         finally:
-            # Async workers clean their own temporary directory after parsing.
+            # 异步工作进程会在解析完成后清理自己的临时目录。
             if 'task_id' not in locals():
                 shutil.rmtree(temp_dir, ignore_errors=True)
 

@@ -1,4 +1,4 @@
-"""Procurement-review project and task authorization."""
+"""采购审查项目和任务授权。"""
 
 from typing import Any
 

@@ -1,1 +1,1 @@
-"""Small, dependency-free authorization predicates used by application services."""
+"""供应用服务使用的小型、无依赖授权谓词。"""

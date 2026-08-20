@@ -1,8 +1,9 @@
-"""Migrated core checks for the authoritative backend review engine."""
+"""权威后端审查引擎的迁移后核心检查。"""
 
 from app.review_engine.services.legal.knowledge import build_legal_knowledge
 from app.review_engine.services.procurement.ledger import LedgerService
-from app.review_engine.services.procurement.workflow import rank_legal_units, structure_review_batches
+from app.review_engine.services.legal.retrieval import rank_legal_units
+from app.review_engine.services.procurement.structure import structure_review_batches
 from app.review_engine.services.topics import canonical_topic
 from app.review_engine.tools import ToolContext, build_registry
 from app.review_engine.tools.legal.rules import search_legal_units
@@ -20,6 +21,7 @@ def test_migrated_legal_knowledge_retrieval_and_tool_allowlist() -> None:
     assert unit["paragraph_no"] == 1 and "本法用于测试" in unit["search_text"]
     found = search_legal_units(context=ToolContext(run_id="law-test"), units=knowledge["units"], query=unit["text"], top_k=1)
     assert found["units"][0]["legal_unit_id"] == unit["legal_unit_id"]
+    assert "retrieval_signals" in found["units"][0]
     assert rank_legal_units(knowledge["units"], [{"statement": "供应商不得伪造投标证明材料"}], 1)[0]["article_no"] == "第二条"
     registry = build_registry()
     result = registry.call("search_legal_units", ToolContext(run_id="law-test", agent="procurement_review_agent"), units=knowledge["units"], query=unit["text"], top_k=1)

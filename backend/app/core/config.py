@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     uploads_dir: str = "./data/uploads"
     max_upload_bytes: int = 50 * 1024 * 1024
     storage_backend: str = "json"
+    database_url: str = ""
     mineru_api_url: str = "http://127.0.0.1:8001"
     mineru_timeout_seconds: int = 900
     review_task_timeout_seconds: int = 120
@@ -32,9 +33,9 @@ class Settings(BaseSettings):
 
     @field_validator("storage_backend")
     @classmethod
-    def only_json_storage(cls, value: str) -> str:
-        if value != "json":
-            raise ValueError("当前仅支持 STORAGE_BACKEND=json；PostgreSQL Repository 尚未实现")
+    def storage_backend_supported(cls, value: str) -> str:
+        if value not in {"json", "postgres"}:
+            raise ValueError("STORAGE_BACKEND 仅支持 json 或 postgres")
         return value
 
 

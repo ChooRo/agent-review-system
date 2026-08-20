@@ -1,1 +1,1 @@
-"""Procurement-document processing services."""
+"""采购文档处理服务。"""

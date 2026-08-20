@@ -1,6 +1,7 @@
 from pathlib import Path
 
-from app.review_engine.services.procurement.workflow import WorkflowEngine, derive_task_legal_facts, match_legal_documents
+from app.review_engine.services.legal.metadata import derive_task_legal_facts, match_legal_documents
+from app.review_engine.services.procurement.workflow import WorkflowEngine
 
 
 def source(key: str) -> dict:
