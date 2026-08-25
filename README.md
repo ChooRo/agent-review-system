@@ -4,6 +4,7 @@
 
 ## 文档入口
 
+- 新环境部署：[docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md)
 - 产品边界：[docs/PRD.md](./docs/PRD.md)
 - 总体架构：[docs/Architecture.md](./docs/Architecture.md)
 - 接口索引：[docs/API.md](./docs/API.md)
@@ -38,4 +39,3 @@
 ## 测试
 
 唯一权威测试入口：`cd backend && uv run --no-sync pytest -q`。
-
