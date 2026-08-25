@@ -4,6 +4,7 @@ backend/data/backups/
 backend/data/review_data.json
 backend/data/auth.json
 knowledge/rules/
+docs/
 backend/logs/
 __pycache__/
 *.pyc
