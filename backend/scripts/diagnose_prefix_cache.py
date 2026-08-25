@@ -14,7 +14,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
-from app.review_engine.services.procurement.workflow import (
+from app.review_engine.procurement.agent_workflow import (
     PROCUREMENT_EXTRACTION_CONTRACT,
     load_formal_skill,
 )

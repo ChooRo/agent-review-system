@@ -4,8 +4,8 @@ from pathlib import Path
 from typing import Callable
 
 from app.core.config import get_settings
-from app.review_engine.services.procurement.workflow import STEPS, WorkflowEngine
-from app.review_engine.services.runtime import read_json, write_json
+from app.review_engine.procurement.agent_workflow import STEPS, WorkflowEngine
+from app.review_engine.runner import read_json, write_json
 from app.review_engine.settings import load_settings
 
 

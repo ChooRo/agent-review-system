@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import os
 import re
 import shutil
-import uuid
 import threading
+import hashlib
+import json
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,13 +15,13 @@ from fastapi import HTTPException, UploadFile
 
 from app.core.config import get_settings
 from app.policies import knowledge as knowledge_policy
-from app.repositories.json_store import JsonStore
-from app.repositories.knowledge_repository import KnowledgeRepository
-from app.review_engine.services.legal.knowledge import check_legal_quality, ingest_legal_document
-from app.review_engine.services.legal.metadata import extract_applicability, prepare_metadata_extraction
-from app.review_engine.services.llm import LLMService
-from app.review_engine.services.mineru import MinerUService
-from app.review_engine.services.runtime import RunStore
+from app.integrations.storage.local import LocalStorage
+from app.repositories.postgres.knowledge_repository import DuplicateKnowledgeUpload, PostgresKnowledgeRepository
+from app.review_engine.legal.knowledge import check_legal_quality, ingest_legal_document
+from app.review_engine.legal.metadata import extract_applicability, prepare_metadata_extraction
+from app.integrations.llm import LLMService
+from app.integrations.mineru import MinerUService
+from app.review_engine.runner import RunStore
 from app.review_engine.settings import load_settings as load_review_settings
 from app.services.procurement.review import ALLOWED_TYPES
 
@@ -31,7 +32,8 @@ class KnowledgeService:
     _tasks_lock = threading.Lock()
     _parse_retries = 3
     def __init__(self) -> None:
-        self.repository = KnowledgeRepository(Path(__file__).resolve().parents[4] / "knowledge" / "rules", Path(get_settings().data_dir))
+        settings = get_settings()
+        self.repository = PostgresKnowledgeRepository(Path(settings.data_dir), LocalStorage(settings.uploads_dir))
 
     @staticmethod
     def _now() -> str:
@@ -49,17 +51,7 @@ class KnowledgeService:
 
     @staticmethod
     def _metadata_audit(value: dict[str, Any], extraction: dict[str, Any], key: str) -> dict[str, Any]:
-        traces = Path(__file__).resolve().parents[4] / "knowledge" / "rules" / key / "metadata_extraction" / "llm_traces"
-        calls = []
-        for path in sorted(traces.glob("legal_metadata_*.json")) if traces.is_dir() else []:
-            try:
-                trace = JsonStore(path).read(); request = trace.get("request", {}); messages = request.get("messages", [])
-                payload = messages[-1].get("content", "") if messages else ""
-                response = trace.get("response")
-                calls.append({"file": path.name, "model": request.get("model"), "skill": "extract-legal-applicability-profile", "tool": "LLMService.json_call", "input_summary": f"候选法规条款 {payload.count('legal_unit_id')} 条", "output_summary": "已返回 applicability JSON" if response else "调用失败", "status": "success" if response else "failed", "error": trace.get("error")})
-            except (OSError, ValueError, TypeError):
-                continue
-        return {**extraction, "audit": {"parser": {"tool": "MinerUService", "input": value.get("legal_document", {}).get("source_file"), "output": "document.json + legal_knowledge.json"}, "calls": calls}}
+        return {**extraction, "audit": {"parser": {"tool": "MinerUService", "input": value.get("legal_document", {}).get("source_file"), "output": "PostgreSQL legal_documents + legal_units"}, "calls": extraction.get("audit", {}).get("calls", [])}}
 
     def rules(self, keyword: str | None, _user: dict) -> list[dict]:
         return self.repository.applicable_rules(keyword)
@@ -69,7 +61,7 @@ class KnowledgeService:
         requested = {name: value for name, value in payload.items() if value is not None}
 
         def mutate(value: dict[str, Any]) -> dict:
-            doc = KnowledgeRepository._metadata(value, key)
+            doc = value["legal_document"]
             if requested_version != doc["metadata_version"]:
                 raise HTTPException(409, "metadata version conflict")
             if not knowledge_policy.can_maintain_knowledge(user):
@@ -112,12 +104,11 @@ class KnowledgeService:
     def extract_metadata(self, key: str, user: dict) -> dict:
         if not knowledge_policy.can_maintain_knowledge(user):
             raise HTTPException(403, "only administrators can extract legal metadata")
-        found = self.repository._path_and_value(key)
-        if not found:
+        knowledge = self.repository.get_document(key)
+        if not knowledge:
             raise HTTPException(404, "legal knowledge document not found")
-        path, knowledge = found
-        document_path = path.parent / "document.json"
-        document = JsonStore(document_path).read() if document_path.is_file() else {"blocks": []}
+        settings = get_settings()
+        document = self.repository.get_source_document(key)
         # 每次明确执行时都重新构建本地候选项，同时恢复因服务器或浏览器停止而遗留的
         # 持久化 `processing` 状态。
         extraction = prepare_metadata_extraction(knowledge, document)
@@ -139,7 +130,7 @@ class KnowledgeService:
                 "timeout_seconds": min(float(config.get("timeout_seconds", 120)), 120),
                 "max_retries": 0,
             }
-            llm = LLMService(metadata_config, RunStore(path.parent / "metadata_extraction"))
+            llm = LLMService(metadata_config, RunStore(Path(settings.data_dir) / "knowledge_metadata" / key))
             applicability, warnings = extract_applicability(llm, candidates)
         except Exception as exc:
             def fail(value: dict[str, Any]) -> None:
@@ -150,7 +141,8 @@ class KnowledgeService:
             return self.detail(key, user)
 
         def complete(value: dict[str, Any]) -> None:
-            doc = KnowledgeRepository._metadata(value, key)
+            doc = value["legal_document"]
+            value.setdefault("metadata_history", []).append({"metadata_version": doc["metadata_version"], "updated_at": self._now(), "updated_by": user["id"], "snapshot": dict(doc)})
             doc.update({"metadata_version": doc["metadata_version"] + 1, "updated_at": self._now(), "updated_by": user["id"]})
             current = value.setdefault("metadata_extraction", extraction)
             current.update({"status": "ready", "applicability": applicability, "warnings": warnings, "updated_at": self._now()})
@@ -175,6 +167,7 @@ class KnowledgeService:
         temp_dir = data_dir / "knowledge_ingest" / uuid.uuid4().hex
         output_dir = temp_dir / "output"
         source = temp_dir / f"source{suffix}"
+        task_registered = False
         try:
             temp_dir.mkdir(parents=True)
             size = 0
@@ -190,20 +183,26 @@ class KnowledgeService:
             if (suffix == ".pdf" and not head.startswith(b"%PDF-")) or (suffix == ".docx" and not head.startswith(b"PK")) or (suffix == ".doc" and not head.startswith(b"\xd0\xcf\x11\xe0")):
                 raise HTTPException(400, "file header does not match extension")
             task_id = uuid.uuid4().hex
+            source_fingerprint = "sha256:" + hashlib.sha256(source.read_bytes()).hexdigest()
+            source_filename = file.filename or source.name
+            reservation_key = self.repository.reserve_upload(source_fingerprint, task_id, source_filename)
             task = {"id": task_id, "status": "queued", "progress": 0, "retry_count": 0, "max_retries": self._parse_retries, "error": None, "document_key": None}
-            task.update({"_source": source, "_output_dir": output_dir, "_suffix": suffix, "_metadata": metadata, "_user": user, "_settings": settings, "_repository": self.repository})
+            task.update({"_source": source, "_output_dir": output_dir, "_suffix": suffix, "_metadata": metadata, "_user": user, "_settings": settings, "_repository": self.repository, "_source_fingerprint": source_fingerprint, "_source_filename": source_filename, "_reservation_key": reservation_key})
             with self._tasks_lock:
                 self._tasks[task_id] = task
+                task_registered = True
             # 任务存续期间，该目录由工作进程负责管理。
-            self._executor.submit(self._run_upload_task, task_id, source, output_dir, suffix, metadata, user, settings, self.repository)
+            self._executor.submit(self._run_upload_task, task_id, source, output_dir, suffix, metadata, user, settings, self.repository, source_fingerprint, source_filename, reservation_key)
             return {"task_id": task_id, **(self.task(task_id) or {})}
+        except DuplicateKnowledgeUpload:
+            raise HTTPException(409, "legal document already exists") from None
         except HTTPException:
             raise
         except Exception as exc:
             raise HTTPException(502, f"legal document upload failed: {type(exc).__name__}") from exc
         finally:
             # 异步工作进程会在解析完成后清理自己的临时目录。
-            if 'task_id' not in locals():
+            if not task_registered:
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
     @classmethod
@@ -218,7 +217,7 @@ class KnowledgeService:
             if not task or task.get("status") != "failed" or task.get("retry_count", 0) >= cls._parse_retries:
                 return None
             task.update({"status": "queued", "progress": 0, "error": None, "message": "等待手动重试", "retry_count": task.get("retry_count", 0) + 1})
-            args = (task_id, task["_source"], task["_output_dir"], task["_suffix"], task["_metadata"], task["_user"], task["_settings"], task["_repository"])
+            args = (task_id, task["_source"], task["_output_dir"], task["_suffix"], task["_metadata"], task["_user"], task["_settings"], task["_repository"], task["_source_fingerprint"], task["_source_filename"], task["_reservation_key"])
         cls._executor.submit(cls._run_upload_task, *args)
         return cls.task(task_id)
 
@@ -229,7 +228,7 @@ class KnowledgeService:
                 cls._tasks[task_id].update(changes)
 
     @classmethod
-    def _run_upload_task(cls, task_id: str, source: Path, output_dir: Path, suffix: str, metadata: dict, user: dict, settings: Any, repository: KnowledgeRepository) -> None:
+    def _run_upload_task(cls, task_id: str, source: Path, output_dir: Path, suffix: str, metadata: dict, user: dict, settings: Any, repository: PostgresKnowledgeRepository, source_fingerprint: str, source_filename: str, reservation_key: str) -> None:
         try:
             cls._update_task(task_id, status="parsing", progress=10)
             cls._update_task(task_id, message="正在解析法规文档")
@@ -245,17 +244,18 @@ class KnowledgeService:
             now = cls._now()
             document = knowledge.setdefault("legal_document", {})
             document.update({"title": metadata.get("title") or document.get("title") or document_key, "issuer": metadata.get("issuer") or document.get("issuer"), "department": metadata.get("department"), "document_version": metadata.get("document_version") or "unknown", "applicable_scope": metadata.get("applicable_scope") or "", "effective_date": metadata.get("effective_date") or document.get("effective_date"), "expiry_date": metadata.get("expiry_date") or document.get("expiry_date"), "status": "unknown", "metadata_version": 1, "updated_at": now, "updated_by": user["id"]})
-            parsed_document = JsonStore(output_dir / "document.json").read()
-            storage_key = f"{document_key}/original{suffix}"
+            parsed_document = json.loads((output_dir / "document.json").read_text(encoding="utf-8"))
+            storage_key = f"legal/{document_key}/original{suffix}"
             document.update({"source_file": storage_key, "source_storage_key": storage_key}); parsed_document["source_file"] = storage_key
             knowledge["metadata_extraction"] = prepare_metadata_extraction(knowledge, parsed_document)
-            JsonStore(output_dir / "document.json").write(parsed_document); JsonStore(output_dir / "legal_knowledge.json").write(knowledge); shutil.copy2(source, output_dir / f"original{suffix}")
-            final_dir = repository.root / document_key
-            if final_dir.exists(): raise ValueError("document_key already exists")
-            archive_stage = final_dir.parent / f".{document_key}.upload-{uuid.uuid4().hex}"
-            shutil.copytree(output_dir, archive_stage); os.replace(archive_stage, final_dir); shutil.rmtree(archive_stage, ignore_errors=True)
+            if repository.get_document(document_key):
+                raise ValueError("document_key already exists")
+            repository.storage.upload(storage_key, source.read_bytes())
+            repository.upsert_legacy(knowledge, parsed_document, storage_key, source_fingerprint=source_fingerprint, source_filename=source_filename)
+            repository.release_upload_reservation(reservation_key)
             cls._update_task(task_id, status="completed", progress=100, document_key=document_key, result=repository.document_item(knowledge, document_key), error=None)
         except Exception as exc:
+            repository.release_upload_reservation(reservation_key)
             cls._update_task(task_id, status="failed", progress=100, error=f"{type(exc).__name__}: {exc}")
         finally:
             if cls.task(task_id) and cls.task(task_id).get("status") == "completed":

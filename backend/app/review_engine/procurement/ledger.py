@@ -8,7 +8,7 @@ from collections import defaultdict
 from difflib import SequenceMatcher
 from typing import Any
 
-from ..topics import assertion_topics
+from ..common.topics import assertion_topics
 
 
 def normalize_text(value: Any) -> str:

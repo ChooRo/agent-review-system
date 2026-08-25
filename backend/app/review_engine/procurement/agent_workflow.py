@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import re
 import time
 from collections import defaultdict
@@ -12,11 +11,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
 
-from ..llm import LLMService, OutputLengthExceeded, JsonGuardAbort
-from ..mineru import MinerUService
-from ..runtime import RunStore, read_json, write_json
-from ...tools.legal.rules import search_rules
-from ...tools.schemas import ToolContext
+from app.integrations.llm import LLMService, OutputLengthExceeded, JsonGuardAbort
+from app.integrations.mineru import MinerUService
+from ..runner import CheckpointRunner, RunStore, read_json, write_json
+from ..tools.legal.rules import search_rules
+from ..tools.schemas import ToolContext
 from ..legal.metadata import derive_task_legal_facts, match_legal_documents
 from ..legal.retrieval import rank_legal_units
 from .batching import (
@@ -26,21 +25,19 @@ from .candidates import (
     collect_system_warnings, deduplicate_findings, deterministic_hard_facts,
     extraction_batch_payload, merge_candidate_items, validate_candidate_items,
     extraction_failure_finding,
+    missing_element_is_covered,
 )
 from .evidence import EvidenceValidationService
 from .ledger import LedgerService, SceneViewService, procurement_assertions
 from .quality import (
     QualityCheckService, QualityGateError,
-    retry_table_ranges, supplement_damaged_table_text, table_direct_ocr_pages,
-    table_retry_ranges,
 )
 from .structure import (
-    batch_manifest, block_payload, classify_structure_heading, deduplicate_objects,
+    classify_structure_heading, deduplicate_objects,
     deterministic_clause_relations, deterministic_inventories, deterministic_references,
-    merge_structure_profiles, structure_context_for_blocks, structure_review_batches,
+    merge_structure_profiles,
 )
 from app.core.config import get_settings
-from app.repositories.backend import get_rule_repository
 
 
 STEPS = [
@@ -84,13 +81,15 @@ PROCUREMENT_EXTRACTION_CONTRACT = """
 \n输入blocks短键：id=block_id，t=type，p=page，r=内容角色，x=原文，tbl=表格业务记录，tf=表格分片。
 表格优先读取tbl；其中结构关系是带置信度的解析结果，引用仍必须使用真实id和连续原文。
 返回严格JSON：{"candidate_items":[{"primary_category":"","requirement_type":"","statement":"","evidence_block_ids":[""],"evidence_quote":""}]}。
-顶层只能有candidate_items；可选字段仅在有原文依据且非空时输出。
+顶层仅candidate_items；其他字段需有原文依据。
+不输出风险分析、法规判断、整改建议。
 """
 
 
-class WorkflowEngine:
-    """执行九步审查流水线，并在每一步完成后保存可恢复检查点。"""
-    # ponytail：为便于追溯，保留迁移后的工作流；待后端契约稳定后再拆分解析、台账和审查阶段。
+class WorkflowEngine(CheckpointRunner):
+    """采购文件 AI 步骤编排；检查点生命周期由 CheckpointRunner 负责。"""
+
+    STEPS = tuple(STEPS)
 
     def __init__(
         self,
@@ -99,13 +98,10 @@ class WorkflowEngine:
         config: dict[str, Any] | None = None,
         progress_callback: Callable[[RunStore, dict[str, Any], str | None], None] | None = None,
     ):
-        self.runs_root = runs_root.resolve()
+        super().__init__(runs_root, config, progress_callback)
         self.skills = read_json(skills_path)
-        self.config = config or {}
-        self.progress_callback = progress_callback
         formal_root = skills_path.parent / "skills"
         self.formal_skills = {
-            "structure": load_formal_skill(formal_root / "understand-document-structure"),
             # 每个批次只执行一次提取。保留可复用规则，但不要在每次无状态请求中重复发送
             # 冗长的参考示例。
             "procurement": load_formal_skill(
@@ -114,35 +110,11 @@ class WorkflowEngine:
             "procurement_review": load_formal_skill(formal_root / "review-procurement-document"),
         }
 
-    def start(
-        self,
-        scenario: str,
-        documents: dict[str, str],
-        pause_after: str | None = None,
-        task_context: dict[str, Any] | None = None,
-    ) -> RunStore:
-        """校验输入、创建运行并执行到完成或指定断点。"""
+    def validate_request(self, scenario: str, documents: dict[str, str], pause_after: str | None) -> None:
         validate_request(scenario, documents, pause_after)
-        store = RunStore.create(self.runs_root, scenario, documents, pause_after, task_context)
-        return self.run(store)
 
-    def resume(self, run_dir: Path, pause_after: str | None = None) -> RunStore:
-        """从最后一个成功步骤后继续；可设置新的暂停点。"""
-        store = RunStore(run_dir)
-        state = store.load_state()
-        if state["status"] == "completed":
-            return store
-        if pause_after is not None:
-            if pause_after not in STEPS:
-                raise ValueError(f"未知断点：{pause_after}")
-            state["pause_after"] = pause_after
-            store.save_state(state)
-        store.event("INFO", "run", "resumed", "从检查点恢复运行")
-        return self.run(store)
-
-    def run(self, store: RunStore) -> RunStore:
-        """按固定顺序执行未完成步骤，失败时保留现场。"""
-        state = store.load_state()
+    def runtime_services(self, store: RunStore) -> tuple[LLMService, MinerUService]:
+        """构造采购步骤使用的模型和文档解析服务。"""
         llm = LLMService(self.config.get("llm", {}), store)
         mineru_config = self.config.get("mineru", {})
         mineru = MinerUService(
@@ -152,66 +124,7 @@ class WorkflowEngine:
             str(mineru_config.get("backend") or "pipeline"),
             str(mineru_config.get("effort") or "medium"),
         )
-        handlers: dict[str, Callable[[RunStore, dict[str, Any], LLMService, MinerUService], Any]] = {
-            name: getattr(self, f"_{name}") for name in STEPS
-        }
-        state["status"] = "running"
-        state["error"] = None
-        store.save_state(state)
-        if self.progress_callback:
-            self.progress_callback(store, state, None)
-        for index, step in enumerate(STEPS, start=1):
-            state = store.load_state()
-            if step in state["completed_steps"]:
-                continue
-            state["current_step"] = step
-            store.save_state(state)
-            started = time.perf_counter()
-            store.event("INFO", step, "started", "步骤开始")
-            try:
-                output = handlers[step](store, state, llm, mineru)
-                artifact = store.write_artifact(index, step, output)
-                state = store.load_state()
-                state["completed_steps"].append(step)
-                state["current_step"] = None
-                state["error"] = None
-                duration = round(time.perf_counter() - started, 3)
-                store.save_state(state)
-                if self.progress_callback:
-                    self.progress_callback(store, state, step)
-                store.event(
-                    "INFO",
-                    step,
-                    "completed",
-                    "步骤完成",
-                    duration_seconds=duration,
-                    artifact=str(artifact),
-                    summary=summarize(output),
-                )
-                if state.get("pause_after") == step:
-                    state["status"] = "paused"
-                    store.save_state(state)
-                    store.event("INFO", step, "paused", "命中断点，等待恢复")
-                    return store
-            except Exception as exc:
-                state = store.load_state()
-                state["status"] = "failed"
-                state["error"] = {"step": step, "type": type(exc).__name__, "message": str(exc)}
-                store.save_state(state)
-                store.event("ERROR", step, "failed", str(exc), error_type=type(exc).__name__)
-                logging.getLogger("review_mvp").exception("步骤失败：%s", step)
-                return store
-        state = store.load_state()
-        state["status"] = "completed"
-        state["current_step"] = None
-        store.save_state(state)
-        store.event("INFO", "run", "completed", "全部步骤完成")
-        return store
-
-    def _previous(self, store: RunStore, step: str) -> Any:
-        """读取指定步骤的检查点产物。"""
-        index = STEPS.index(step) + 1
-        return store.read_artifact(index, step)
+        return llm, mineru
 
     def _parse_documents(
         self, store: RunStore, state: dict[str, Any], llm: LLMService, mineru: MinerUService
@@ -234,79 +147,15 @@ class WorkflowEngine:
     def _quality_check(
         self, store: RunStore, state: dict[str, Any], llm: LLMService, mineru: MinerUService
     ) -> dict[str, Any]:
-        """执行四态解析质量门禁；retryable 自动以 OCR 模式重试一次。"""
+        """执行四态解析质量门禁；问题交给后续审核流程处理。"""
         parsed = self._previous(store, "parse_documents")
         reports: dict[str, Any] = {}
         checker = QualityCheckService()
-        mineru_config = self.config.get("mineru", {})
         for role, document in parsed["documents"].items():
             prepared, actions = checker.prepare(document)
             report = checker.check(prepared)
-            supplement_damaged_table_text(
-                mineru, prepared, Path(state["documents"][role]), report,
-            )
-            report = checker.check(prepared)
             report["actions"] = actions
             parsed["documents"][role] = prepared
-            table_codes = {"TABLE_STRUCTURE", "TABLE_CONTENT_QUALITY", "EMPTY_TABLE_PLACEHOLDER"}
-            table_failure = any(issue.get("code") in table_codes for issue in report.get("issues", []))
-            retryable_parse = report["status"] == "retryable" or table_failure
-            if retryable_parse and Path(state["documents"][role]).suffix.lower() != ".json":
-                retry_backend = str(mineru_config.get("table_retry_backend") or "hybrid-engine") if table_failure else mineru.backend
-                retry_effort = str(mineru_config.get("table_retry_effort") or "high") if table_failure else mineru.effort
-                direct_ocr_pages = table_direct_ocr_pages(prepared, report) if table_failure else set()
-                retry_method = "adaptive" if table_failure else "ocr"
-                store.event(
-                    "WARNING", "quality_check", "retry_started",
-                    (f"{role}表格异常，按问题类型执行局部 OCR 或 Hybrid→OCR"
-                     if table_failure else f"{role}解析质量可重试，切换 {retry_backend}/{retry_method} 模式"),
-                    backend="adaptive" if table_failure else retry_backend,
-                    parse_method=retry_method, effort=retry_effort,
-                )
-                try:
-                    if table_failure:
-                        ranges = table_retry_ranges(prepared, report)
-                        reparsed, retry_attempts = retry_table_ranges(
-                            prepared, Path(state["documents"][role]), store.run_dir / "mineru_retry" / role,
-                            role, ranges, direct_ocr_pages, mineru, retry_backend, retry_effort,
-                            memo_path=store.run_dir.parent / "table_retry_memo.json",
-                        )
-                    else:
-                        ranges = []
-                        retry_attempts = []
-                        reparsed = mineru.parse(
-                            Path(state["documents"][role]), store.run_dir / "mineru_retry" / role, role,
-                            parse_method=retry_method, backend=retry_backend, effort=retry_effort,
-                        )
-                    reparsed, retry_actions = checker.prepare(reparsed)
-                    retry_report = checker.check(reparsed)
-                    supplement_damaged_table_text(
-                        mineru, reparsed, Path(state["documents"][role]), retry_report,
-                    )
-                    retry_report = checker.check(reparsed)
-                    retry_report["retry"] = {
-                        "attempted": True, "status": "completed",
-                        "backend": "adaptive" if table_failure else retry_backend,
-                        "parse_method": retry_method, "effort": retry_effort,
-                        "previous_status": report["status"],
-                        "page_ranges": ranges,
-                        "attempts": retry_attempts,
-                    }
-                    retry_report["actions"] = retry_actions
-                    parsed["documents"][role] = reparsed
-                    report = retry_report
-                except Exception as exc:
-                    report["retry"] = {
-                        "attempted": True, "status": "failed",
-                        "backend": "adaptive" if table_failure else retry_backend,
-                        "parse_method": retry_method, "effort": retry_effort,
-                        "previous_status": report["status"], "error_type": type(exc).__name__,
-                    }
-                    store.event(
-                        "WARNING", "quality_check", "retry_failed",
-                        f"{'表格自适应' if table_failure else retry_backend} 重解析失败，回退首次解析并生成无法判断问题",
-                        error_type=type(exc).__name__,
-                    )
             if report["status"] != "unreliable" and any(
                 issue.get("review_route") == "review_finding" for issue in report.get("issues", [])
             ):
@@ -345,7 +194,7 @@ class WorkflowEngine:
     def _structure_profile(
         self, store: RunStore, state: dict[str, Any], llm: LLMService, mineru: MinerUService
     ) -> dict[str, Any]:
-        """生成章节树、文档统计和可供后续批次共享的全局画像。"""
+        """生成确定性章节树、文档统计和全局结构画像。"""
         parsed = self._previous(store, "parse_documents")
         profiles: dict[str, Any] = {}
         quality = self._previous(store, "quality_check")["quality"]
@@ -382,41 +231,20 @@ class WorkflowEngine:
                 "clause_relations": deterministic_clause_relations(document.get("blocks", [])),
                 "references": deterministic_references(document.get("blocks", [])),
             }
-            review_batches = structure_review_batches(document.get("blocks", []), role, 12_000)
             write_json(
                 store.run_dir / "batch_artifacts" / "structure_review" / f"{role}.json",
-                {"document_role": role, "purpose": "疑难结构语义理解", "batches": [batch_manifest(index, batch) for index, batch in enumerate(review_batches, start=1)]},
+                {"document_role": role, "purpose": "纯确定性结构识别", "status": "skipped_llm", "batches": []},
             )
             store.event(
                 "INFO",
                 "structure_profile",
-                "llm_scope_selected",
-                f"{role}目录骨架已生成，仅疑难批次进入LLM",
+                "deterministic_profile_built",
+                f"{role}目录骨架已生成，未调用结构LLM",
                 heading_count=len(headings),
-                llm_batch_count=len(review_batches),
+                llm_batch_count=0,
             )
-            partials = []
-            for batch_no, blocks in enumerate(review_batches, start=1):
-                partials.append(
-                    llm.json_call(
-                        "structure_profile",
-                        self.formal_skills["structure"]
-                        + "\n当前输入是全文中的一个完整章节批次。严格按输出契约返回JSON；只返回本批能够证明的结构事实，后端会全局合并。",
-                        {
-                            "document_role": role,
-                            "quality_report": quality.get(role),
-                            "base_outline": base["outline"],
-                            "batch_no": batch_no,
-                            "blocks": block_payload(blocks),
-                        },
-                        max_tokens=6_000,
-                        stream=True,
-                        idle_timeout_seconds=120,
-                        total_timeout_seconds=480,
-                    )
-                )
-            profiles[role] = merge_structure_profiles(base, partials, quality.get(role, {}))
-            profiles[role]["llm_review_batch_count"] = len(review_batches)
+            profiles[role] = merge_structure_profiles(base, [], quality.get(role, {}))
+            profiles[role]["llm_review_batch_count"] = 0
         return {"profiles": profiles}
 
     def _extract_candidates(
@@ -424,10 +252,9 @@ class WorkflowEngine:
     ) -> dict[str, Any]:
         """按完整章节批次提取候选原子事项，并要求每项绑定Block。"""
         batches = self._previous(store, "assemble_review_batches")["manifests"]
-        profiles = self._previous(store, "structure_profile")["profiles"]
         candidates: dict[str, list[dict[str, Any]]] = {}
         workflow_config = self.config.get("workflow", {})
-        workers = int(workflow_config.get("extract_workers", 3))
+        workers = int(workflow_config.get("extract_workers", 6))
         max_request_tokens = int(workflow_config.get("max_request_tokens", 12_000))
         output_tokens = int(workflow_config.get("output_tokens", 3_000))
         rerun_batches = {int(value) for value in workflow_config.get("rerun_batches", [])}
@@ -472,7 +299,6 @@ class WorkflowEngine:
                     **expected_budget,
                 )
             skill = self.skills["document_understanding"][role]
-            structure_profile = profiles.get(role, {})
             role_items: list[dict[str, Any]] = []
             sections = review_manifest.get("batches", [])
             if debug_extract_batches:
@@ -490,8 +316,27 @@ class WorkflowEngine:
 
             def extract_batch(
                 entry: tuple[int, dict[str, Any]]
-            ) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]], bool, dict[str, Any] | None]:
+            ) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]], bool, dict[str, Any] | None, dict[str, Any]]:
                 batch_no, batch = entry
+                batch_started = time.perf_counter()
+                batch_rate_limited = False
+
+                def finish(
+                    value: tuple[int, list[dict[str, Any]], list[dict[str, Any]], bool, dict[str, Any] | None],
+                    *, executed: bool = True,
+                    metrics: dict[str, Any] | None = None,
+                ) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]], bool, dict[str, Any] | None, dict[str, Any]]:
+                    nonlocal batch_rate_limited
+                    failure = value[4]
+                    elapsed = round(time.perf_counter() - batch_started, 3)
+                    return (*value, {
+                        "duration_seconds": elapsed if executed else 0.0,
+                        "cache_reused": not executed,
+                        "cache_lookup_seconds": elapsed if not executed else 0.0,
+                        "rate_limited": batch_rate_limited or _is_rate_limited(failure),
+                        **(metrics or {}),
+                    })
+
                 batch_call_options = {
                     **extract_call_options,
                     "max_tokens": rerun_output_tokens if batch_no in rerun_batches else output_tokens,
@@ -517,7 +362,6 @@ class WorkflowEngine:
                     prompt = self.formal_skills["procurement"] + PROCUREMENT_EXTRACTION_CONTRACT
                     result_key = "candidate_items"
                 prompt += ("" if role == "procurement" else " 返回严格JSON：{\"items\":[{\"category\":\"\",\"statement\":\"\",\"subject\":\"\",\"action\":\"\",\"condition\":\"\",\"value\":\"\",\"mandatory\":false,\"evidence_block_ids\":[\"B-...\"],\"evidence_quote\":\"原文摘录\"}]}。")
-                structure_context = structure_context_for_blocks(structure_profile, valid_ids)
                 payload = {
                     "document_role": role,
                     "allowed_categories": skill["categories"],
@@ -525,7 +369,6 @@ class WorkflowEngine:
                     "batch_purpose": batch.get("purpose"),
                     "coverage_strategy": batch.get("coverage_strategy"),
                     "batch_quality": compact_batch_quality(review_manifest.get("validation")),
-                    **({"structure_context": structure_context} if structure_context else {}),
                     **extraction_batch_payload(role, blocks),
                 }
                 fingerprint = hashlib.sha1(
@@ -549,10 +392,25 @@ class WorkflowEngine:
                         and cached.get("input_fingerprint") == fingerprint
                         and cached.get("status", "completed") == "completed"
                     ):
-                        return (
+                        cached_metrics = {
+                            "model_output_characters": int(cached.get("model_output_characters", cached.get("output_characters", 0)) or 0),
+                            "model_output_tokens": int(cached.get("model_output_tokens", cached.get("output_tokens", 0)) or 0),
+                            "normalized_output_characters": int(
+                                cached.get("normalized_output_characters", len(json.dumps([
+                                    *cached.get("accepted", []), *cached.get("rejected", [])
+                                ], ensure_ascii=False))) or 0
+                            ),
+                            "normalized_output_tokens": int(cached.get(
+                                "normalized_output_tokens",
+                                token_estimate(json.dumps([
+                                    *cached.get("accepted", []), *cached.get("rejected", [])
+                                ], ensure_ascii=False)),
+                            ) or 0),
+                        }
+                        return finish((
                             batch_no, cached.get("accepted", []), cached.get("rejected", []), True,
                             cached.get("failure"),
-                        )
+                        ), executed=False, metrics=cached_metrics)
 
                 if request_tokens > max_request_tokens:
                     failure = {
@@ -560,13 +418,14 @@ class WorkflowEngine:
                         "error_type": "RequestTokenLimit",
                         "message": f"完整请求预计 {request_tokens} Token，超过上限 {max_request_tokens}",
                         "request_tokens": request_tokens,
+                        "rate_limited": False,
                     }
                     write_json(checkpoint, {
                         "schema_version": 8, "status": "failed", "document_role": role,
                         "batch_no": batch_no, "input_fingerprint": fingerprint,
                         "request_tokens": request_tokens, "accepted": [], "rejected": [], "failure": failure,
                     })
-                    return batch_no, [], [], False, failure
+                    return finish((batch_no, [], [], False, failure))
 
                 try:
                     result = llm.json_call(
@@ -587,6 +446,7 @@ class WorkflowEngine:
                     )
                 except RuntimeError as exc:
                     cause = exc.__cause__ or exc
+                    batch_rate_limited = _is_rate_limited_exception(cause)
                     if isinstance(cause, (OutputLengthExceeded, JsonGuardAbort)):
                         # 输出未完整生成（截断或守卫掐断）都是本批"写不完"，且温度0下同输入会原样重演，
                         # 只有拆批改输入才可能写完。按主块中点拆成子批重提，递归直到单批写得完。
@@ -601,6 +461,7 @@ class WorkflowEngine:
                                 "error_type": type(cause).__name__,
                                 "message": f"输出未完整生成（{type(cause).__name__}），已按 {len(retry_batches)} 个子批重提，{len(sub_failures)} 个子批仍失败",
                                 "request_tokens": request_tokens,
+                                "rate_limited": any(bool(r[4] and r[4].get("rate_limited")) for r in sub_results),
                             } if sub_failures else None
                             for item in accepted:
                                 item["source_batch"] = batch_no
@@ -613,20 +474,32 @@ class WorkflowEngine:
                                 "table_row_count": batch.get("table_row_count"),
                                 "accepted": accepted, "rejected": rejected, "failure": failure,
                             })
-                            return batch_no, accepted, rejected, False, failure
+                            sub_metrics = {
+                                "model_output_characters": sum(int(r[5].get("model_output_characters", 0)) for r in sub_results),
+                                "model_output_tokens": sum(int(r[5].get("model_output_tokens", 0)) for r in sub_results),
+                                "normalized_output_characters": len(json.dumps([*accepted, *rejected], ensure_ascii=False)),
+                                "normalized_output_tokens": token_estimate(json.dumps([*accepted, *rejected], ensure_ascii=False)),
+                            }
+                            return finish((batch_no, accepted, rejected, False, failure), metrics=sub_metrics)
                     failure = {
                         "code": "LLM_BATCH_UNAVAILABLE",
                         "error_type": type(cause).__name__,
                         "message": "模型服务暂时不可用，本批未形成自动提取结论",
                         "request_tokens": request_tokens,
+                        "rate_limited": _is_rate_limited_exception(cause),
                     }
                     write_json(checkpoint, {
                         "schema_version": 8, "status": "failed", "document_role": role,
                         "batch_no": batch_no, "input_fingerprint": fingerprint,
                         "request_tokens": request_tokens, "accepted": [], "rejected": [], "failure": failure,
                     })
-                    return batch_no, [], [], False, failure
+                    return finish((batch_no, [], [], False, failure))
                 model_items = result.get(result_key, [])
+                model_output = json.dumps(result, ensure_ascii=False)
+                model_metrics = {
+                    "model_output_characters": len(model_output),
+                    "model_output_tokens": token_estimate(model_output),
+                }
                 items = merge_candidate_items(model_items, deterministic_hard_facts(role, blocks))
                 accepted, rejected = validate_candidate_items(items, valid_ids, blocks)
                 retryable = [item for item in rejected if item.get("retryable")]
@@ -674,6 +547,7 @@ class WorkflowEngine:
                             rejected = [item for item in rejected if not item.get("retryable")] + retry_rejected
                         except RuntimeError as exc:
                             cause = exc.__cause__ or exc
+                            batch_rate_limited = batch_rate_limited or _is_rate_limited_exception(cause)
                             if not accepted:
                                 failure = {
                                     "code": "CANDIDATE_RETRY_UNAVAILABLE",
@@ -682,6 +556,7 @@ class WorkflowEngine:
                                     "request_tokens": token_estimate(
                                         prompt + json.dumps(retry_payload, ensure_ascii=False)
                                     ),
+                                    "rate_limited": _is_rate_limited_exception(cause),
                                 }
                 for item in accepted:
                     item["source_batch"] = batch_no
@@ -697,16 +572,29 @@ class WorkflowEngine:
                         "primary_block_count": batch.get("primary_block_count", len(batch.get("primary_block_ids", []))),
                         "candidate_estimate": batch.get("candidate_estimate"),
                         "table_row_count": batch.get("table_row_count"),
-                        "output_characters": len(json.dumps(result, ensure_ascii=False)),
+                        "model_output_characters": model_metrics["model_output_characters"],
+                        "model_output_tokens": model_metrics["model_output_tokens"],
+                        "normalized_output_characters": len(json.dumps([*accepted, *rejected], ensure_ascii=False)),
+                        "normalized_output_tokens": token_estimate(json.dumps([*accepted, *rejected], ensure_ascii=False)),
+                        "output_characters": model_metrics["model_output_characters"],
+                        "output_tokens": model_metrics["model_output_tokens"],
                         "accepted": accepted,
                         "rejected": rejected,
                         "failure": failure,
                     },
                 )
-                return batch_no, accepted, rejected, False, failure
+                return finish(
+                    (batch_no, accepted, rejected, False, failure),
+                    metrics={
+                        **model_metrics,
+                        "normalized_output_characters": len(json.dumps([*accepted, *rejected], ensure_ascii=False)),
+                        "normalized_output_tokens": token_estimate(json.dumps([*accepted, *rejected], ensure_ascii=False)),
+                    },
+                )
 
             entries = [(int(batch.get("batch_no") or index), batch) for index, batch in enumerate(sections, start=1)]
             results = []
+            batch_observations: dict[int, dict[str, Any]] = {}
             with ThreadPoolExecutor(max_workers=min(workers, len(entries))) as executor:
                 futures = {executor.submit(extract_batch, entry): entry[0] for entry in entries}
                 for completed_count, future in enumerate(as_completed(futures), start=1):
@@ -717,10 +605,55 @@ class WorkflowEngine:
                         result = (
                             batch_no, [], [], False,
                             {"code": "BATCH_EXECUTION_ERROR", "error_type": type(exc).__name__,
-                             "message": "批次执行异常，本批未形成自动提取结论"},
+                             "message": "批次执行异常，本批未形成自动提取结论",
+                             "rate_limited": _is_rate_limited_exception(exc)},
+                            {"duration_seconds": 0.0, "cache_reused": False,
+                             "rate_limited": _is_rate_limited_exception(exc)},
                         )
                     results.append(result)
-                    _, accepted, rejected, reused, failure = result
+                    _, accepted, rejected, reused, failure, execution_observation = result
+                    batch = next(batch for no, batch in entries if no == batch_no)
+                    input_tokens = int(batch.get("token_estimate") or token_estimate(json.dumps(batch, ensure_ascii=False)))
+                    duration_seconds = float(execution_observation.get("duration_seconds") or 0)
+                    rate_limited = bool(execution_observation.get("rate_limited"))
+                    normalized_output = json.dumps([*accepted, *rejected], ensure_ascii=False)
+                    batch_observations[batch_no] = {
+                        **execution_observation,
+                        "duration_seconds": duration_seconds,
+                        "input_tokens": input_tokens,
+                        "model_output_characters": int(execution_observation.get("model_output_characters", 0) or 0),
+                        "model_output_tokens": int(execution_observation.get("model_output_tokens", 0) or 0),
+                        "normalized_output_characters": int(
+                            execution_observation.get("normalized_output_characters", len(normalized_output))
+                            or 0
+                        ),
+                        "normalized_output_tokens": int(
+                            execution_observation.get("normalized_output_tokens", token_estimate(normalized_output))
+                            or 0
+                        ),
+                        # Backward-compatible aliases: output_* means raw model JSON volume.
+                        "output_characters": int(execution_observation.get("model_output_characters", 0) or 0),
+                        "output_tokens": int(execution_observation.get("model_output_tokens", 0) or 0),
+                        "failure_code": failure.get("code") if failure else None,
+                        "rate_limited": rate_limited,
+                    }
+                    checkpoint = store.run_dir / "batch_artifacts" / "extract_candidates" / f"{role}_{batch_no:03d}.json"
+                    if checkpoint.is_file():
+                        write_json(checkpoint, {
+                            **read_json(checkpoint),
+                            **batch_observations[batch_no],
+                        })
+                    elif failure:
+                        write_json(checkpoint, {
+                            "schema_version": 8,
+                            "status": "failed",
+                            "document_role": role,
+                            "batch_no": batch_no,
+                            "accepted": accepted,
+                            "rejected": rejected,
+                            "failure": failure,
+                            **batch_observations[batch_no],
+                        })
                     store.event(
                         "WARNING" if failure else "INFO",
                         "extract_candidates",
@@ -734,6 +667,13 @@ class WorkflowEngine:
                         accepted_count=len(accepted),
                         rejected_count=len(rejected),
                         failure_code=failure.get("code") if failure else None,
+                        duration_seconds=duration_seconds,
+                        input_tokens=input_tokens,
+                        model_output_characters=batch_observations[batch_no]["model_output_characters"],
+                        model_output_tokens=batch_observations[batch_no]["model_output_tokens"],
+                        normalized_output_characters=batch_observations[batch_no]["normalized_output_characters"],
+                        normalized_output_tokens=batch_observations[batch_no]["normalized_output_tokens"],
+                        rate_limited=rate_limited,
                     )
                     if self.progress_callback:
                         progress_state = {
@@ -746,8 +686,10 @@ class WorkflowEngine:
                         }
                         self.progress_callback(store, progress_state, "extract_candidates")
             role_reports = []
-            for batch_no, accepted, rejected, reused, failure in sorted(results, key=lambda item: item[0]):
+            for batch_no, accepted, rejected, reused, failure, _observation in sorted(results, key=lambda item: item[0]):
                 role_items.extend(accepted)
+                batch = next(batch for no, batch in entries if no == batch_no)
+                observation = batch_observations.get(batch_no, {})
                 role_reports.append({
                     "batch_no": batch_no,
                     "status": "degraded" if failure else "completed",
@@ -755,6 +697,7 @@ class WorkflowEngine:
                     "rejected_count": len(rejected),
                     "reused": reused,
                     "failure": failure,
+                    **observation,
                     **{
                         key: batch.get(key)
                         for no, batch in entries if no == batch_no
@@ -773,10 +716,43 @@ class WorkflowEngine:
                     extraction_findings.append(extraction_failure_finding(role, batch_no, failure))
             candidates[role] = role_items
             batch_reports[role] = role_reports
+        observations = [
+            report
+            for reports in batch_reports.values()
+            for report in reports
+        ]
+        total_duration = round(sum(float(item.get("duration_seconds") or 0) for item in observations), 3)
+        max_duration = round(max((float(item.get("duration_seconds") or 0) for item in observations), default=0.0), 3)
+        success_count = sum(item.get("status") == "completed" for item in observations)
+        failure_count = len(observations) - success_count
+        total_model_output_tokens = sum(int(item.get("model_output_tokens") or 0) for item in observations)
+        total_model_output_characters = sum(int(item.get("model_output_characters") or 0) for item in observations)
+        total_normalized_output_tokens = sum(int(item.get("normalized_output_tokens") or 0) for item in observations)
+        total_normalized_output_characters = sum(int(item.get("normalized_output_characters") or 0) for item in observations)
         return {
             "candidates": candidates,
             "status": "degraded" if extraction_findings else "completed",
             "batch_reports": batch_reports,
+            "extraction_summary": {
+                "batch_count": len(observations),
+                "success_count": success_count,
+                "failure_count": failure_count,
+                "failure_rate": round(failure_count / len(observations), 4) if observations else 0.0,
+                "rate_limited_count": sum(bool(item.get("rate_limited")) for item in observations),
+                "total_duration_seconds": total_duration,
+                "total_batch_duration_seconds": total_duration,
+                "average_duration_seconds": round(total_duration / len(observations), 3) if observations else 0.0,
+                "max_duration_seconds": max_duration,
+                "duration_aggregation": "sum_of_batch_execution_seconds",
+                "total_input_tokens": sum(int(item.get("input_tokens") or 0) for item in observations),
+                "total_model_output_tokens": total_model_output_tokens,
+                "total_model_output_characters": total_model_output_characters,
+                "total_normalized_output_tokens": total_normalized_output_tokens,
+                "total_normalized_output_characters": total_normalized_output_characters,
+                # Backward-compatible aliases: total_output_* means raw model JSON volume.
+                "total_output_tokens": total_model_output_tokens,
+                "total_output_characters": total_model_output_characters,
+            },
             "extraction_findings": extraction_findings,
         }
 
@@ -809,9 +785,15 @@ class WorkflowEngine:
             self._previous(store, "build_ledger")["ledgers"].get("procurement", {})
         )
         legal_units = self._previous(store, "match_legal_applicability").get("applicable_legal_units", [])
+        legal_gate = self._previous(store, "match_legal_applicability")
+        legal_conclusions_allowed = _legal_conclusions_allowed(legal_gate)
         rules = self._previous(store, "match_rules").get("rules", [])
         global_issues = self._previous(store, "global_validation").get("issues", [])
-        workers = max(1, min(int(self.config.get("workflow", {}).get("review_workers", 2)), len(REVIEW_TOPICS)))
+        try:
+            structure = self._previous(store, "structure_profile").get("profiles", {}).get("procurement", {})
+        except (FileNotFoundError, KeyError):
+            structure = {}
+        workers = max(1, min(int(self.config.get("workflow", {}).get("review_workers", 7)), len(REVIEW_TOPICS)))
 
         def review_topic(topic: str) -> dict[str, Any]:
             topic_assertions = [
@@ -825,6 +807,15 @@ class WorkflowEngine:
                 issue for issue in global_issues
                 if topic_blocks.intersection(issue.get("evidence_block_ids", []))
             ][:10]
+            deterministic_leads: Any = topic_issues
+            if topic == "附件与引用":
+                reference_anomalies = [
+                    reference for reference in structure.get("references", [])
+                    if reference.get("status") != "resolved"
+                ]
+                deterministic_leads = {
+                    "anomalies": [*topic_issues, *reference_anomalies],
+                }
             topic_rules = [
                 rule for rule in rules
                 if not rule.get("tags") or any(
@@ -835,14 +826,21 @@ class WorkflowEngine:
             topic_laws = rank_legal_units(
                 legal_units,
                 [*topic_assertions, {"statement": f"{topic} {TOPIC_FOCUS[topic]}"}],
-                top_k=12,
+                top_k=6,
+            )
+            legal_policy = (
+                "法规适用性已确认，可引用输入的适用法规条款。"
+                if legal_conclusions_allowed
+                else "法规适用性未确认或处于降级状态；不得输出违法、法规冲突或其他确定性法规结论，"
+                     "只保留业务完整性、明确性、一致性和可执行性检查。"
             )
             payload = {
                 "topic": topic,
                 "procurement_facts": topic_assertions[:35],
-                "legal_obligations": topic_laws,
+                "legal_obligations": topic_laws if legal_conclusions_allowed else [],
                 "executable_rules": topic_rules,
-                "deterministic_leads": topic_issues,
+                "deterministic_leads": deterministic_leads,
+                "legal_conclusion_policy": legal_policy,
             }
             try:
                 result = llm.json_call(
@@ -850,7 +848,10 @@ class WorkflowEngine:
                     "你是采购文件专项核验员。仅审查输入的一个业务主题。逐项形成法规义务/规则要求—采购事实—差异；"
                     "同时核验完整性、明确性、跨章节一致性和可执行性；即使没有法规条款也要完成业务核验。"
                     "deterministic_leads只是待核线索，不得直接当作问题。没有差异也要记录pass检查。"
-                    "候选问题必须引用真实采购evidence_block_ids；法规问题还必须引用legal_unit_ids。"
+                    "附件与引用主题的正常清单已由程序确定性处理，只根据异常线索核验，不得据正常清单生成标准缺项。"
+                    "pass项只返回简短摘要、最多两条短事实和Block ID，不重复完整条款。"
+                    + legal_policy
+                    + "候选问题必须引用真实采购evidence_block_ids；法规问题还必须引用legal_unit_ids。"
                     "只返回JSON：{\"coverage_status\":\"reviewed|evidence_insufficient\",\"checks\":[{\"legal_obligation\":\"\","
                     "\"procurement_facts\":[],\"difference\":\"\",\"status\":\"pass|gap|conflict|unclear\","
                     "\"evidence_block_ids\":[],\"legal_unit_ids\":[]}],\"candidate_findings\":[{\"finding_type\":\"missing_element|ambiguity|inconsistency|reference_issue|unenforceable|legal_risk|rule_violation|evidence_insufficient\","
@@ -874,6 +875,11 @@ class WorkflowEngine:
                 ):
                     continue
                 candidate = {**finding, "topic": topic}
+                if missing_element_is_covered(candidate, assertions):
+                    continue
+                candidate = _sanitize_legal_candidate(candidate, legal_conclusions_allowed)
+                if candidate is None:
+                    continue
                 fingerprint = json.dumps({
                     "topic": topic, "title": candidate.get("title"),
                     "blocks": sorted(candidate.get("evidence_block_ids", [])),
@@ -884,7 +890,7 @@ class WorkflowEngine:
             return {
                 "topic": topic,
                 "coverage_status": result.get("coverage_status", "reviewed"),
-                "checks": result.get("checks", []),
+                "checks": _compact_review_checks(result.get("checks", [])),
                 "candidate_findings": candidates,
                 "fact_count": len(topic_assertions),
                 "legal_unit_count": len(topic_laws),
@@ -909,68 +915,36 @@ class WorkflowEngine:
     def _agent_review(
         self, store: RunStore, state: dict[str, Any], llm: LLMService, mineru: MinerUService
     ) -> dict[str, Any]:
-        """仅合并专项核验已形成证据链的业务候选问题。"""
-        scenario = state["scenario"]
-        rules = self._previous(store, "match_rules")
-        legal_gate = self._previous(store, "match_legal_applicability")
+        """程序化合并专项核验候选问题，不再调用LLM。"""
         matrix = self._previous(store, "build_compliance_matrix")
         candidates = matrix.get("candidate_findings", [])
-        candidate_index = {item["candidate_id"]: item for item in candidates if item.get("candidate_id")}
-        skill = self.skills["review_agents"][scenario]
-        instruction = skill["instruction"]
-        if scenario == "procurement":
-            instruction = self.formal_skills["procurement_review"]
-        result = llm.json_call(
-            "agent_review",
-            instruction
-            + " 当前是最终合并阶段，只能去重、合并review_candidates中已有候选，不得新增问题。"
-            "每条输出必须列出source_candidate_ids；证据、规则和法规ID只能来自这些候选。"
-            "解析/OCR/提取失败不属于业务问题，本阶段不得输出。"
-            "返回严格JSON：{\"overall_conclusion\":\"\",\"coverage_summary\":[],\"findings\":[{"
-            "\"source_candidate_ids\":[],\"finding_type\":\"\",\"risk_level\":\"high|medium|low|pending\","
-            "\"title\":\"\",\"description\":\"\",\"ledger_item_ids\":[],\"evidence_block_ids\":[],"
-            "\"evidence_quotes\":[],\"rule_ids\":[],\"legal_unit_ids\":[],\"legal_applicability\":\"not_assessed|applicable\","
-            "\"rationale\":\"\",\"recommendation\":\"\",\"confidence\":0.0,\"needs_human_confirmation\":true}]}。",
-            {
-                "scenario": scenario,
-                "coverage_matrix": matrix.get("coverage_matrix", []),
-                "review_candidates": candidates,
-                "rule_coverage": {"matched_count": rules.get("matched_count", 0), "rule_source": rules.get("rule_source")},
-                "legal_context": {
-                    "mode": legal_gate.get("mode", "applicability_gate"),
-                    "decisions": legal_gate.get("decisions", []),
-                },
-            },
-        )
         findings = []
-        for finding in result.get("findings", []):
-            source_ids = [value for value in finding.get("source_candidate_ids", []) if value in candidate_index]
-            if not source_ids:
+        for candidate in candidates:
+            if not isinstance(candidate, dict) or not str(candidate.get("title") or "").strip():
                 continue
-            sources = [candidate_index[value] for value in source_ids]
-            allowed_blocks = {value for item in sources for value in item.get("evidence_block_ids", [])}
-            allowed_laws = {value for item in sources for value in item.get("legal_unit_ids", [])}
-            allowed_rules = {value for item in sources for value in item.get("rule_ids", [])}
-            requested_blocks = [value for value in finding.get("evidence_block_ids", []) if value in allowed_blocks]
-            requested_laws = [value for value in finding.get("legal_unit_ids", []) if value in allowed_laws]
-            requested_rules = [value for value in finding.get("rule_ids", []) if value in allowed_rules]
+            candidate_id = str(candidate.get("candidate_id") or "")
+            if not candidate_id:
+                continue
             findings.append({
-                **finding,
-                "source_candidate_ids": source_ids,
-                "evidence_block_ids": requested_blocks or sorted(allowed_blocks),
-                "legal_unit_ids": requested_laws or sorted(allowed_laws),
-                "rule_ids": requested_rules or sorted(allowed_rules),
-                "legal_applicability": "applicable" if allowed_laws else "not_assessed",
+                **candidate,
+                "source_candidate_ids": [candidate_id],
+                "legal_applicability": "applicable" if candidate.get("legal_unit_ids") else "not_assessed",
+                "needs_human_confirmation": True,
             })
+        findings = deduplicate_findings(findings)
+        coverage_summary = [{
+            "topic": item["topic"], "status": item.get("coverage_status", "evidence_insufficient"),
+            "fact_count": item.get("fact_count", 0), "legal_unit_count": item.get("legal_unit_count", 0),
+        } for item in matrix.get("coverage_matrix", [])]
         return {
-            "agent": skill["name"],
-            "overall_conclusion": str(result.get("overall_conclusion", "AI初审候选问题已完成证据链合并。")),
-            "coverage_summary": [{
-                "topic": item["topic"], "status": item.get("coverage_status", "evidence_insufficient"),
-                "fact_count": item.get("fact_count", 0), "legal_unit_count": item.get("legal_unit_count", 0),
-            } for item in matrix.get("coverage_matrix", [])],
+            "agent": "deterministic_compliance_merge",
+            "overall_conclusion": (
+                f"程序化合并完成：专项核验形成{len(candidates)}项候选问题，"
+                f"去重后保留{len(findings)}项；所有结论均需人工复核。"
+            ),
+            "coverage_summary": coverage_summary,
             "coverage_matrix": matrix.get("coverage_matrix", []),
-            "findings": deduplicate_findings(findings),
+            "findings": findings,
             "tool_results": {"compliance_matrix": matrix},
         }
 
@@ -980,11 +954,22 @@ class WorkflowEngine:
         """执行不依赖LLM的缺项、引用和关键时间冲突检查。"""
         parsed = self._previous(store, "parse_documents")
         view = self._previous(store, "build_scene_view")
+        assertions = procurement_assertions(
+            self._previous(store, "build_ledger")["ledgers"].get("procurement", {})
+        )
         issues: list[dict[str, Any]] = []
         resolved_references: list[dict[str, Any]] = []
         if state["scenario"] == "procurement":
             required = {"资格与实质性条件", "技术需求与验收", "评审办法与评分", "商务报价与付款", "合同履约与责任"}
-            for category in sorted(required - set(view.get("topic_views", {}))):
+            covered_topics = set(view.get("topic_views", {})) | {
+                topic
+                for topic in REVIEW_TOPICS
+                if any(
+                    assertion.get("category") == topic or topic in (assertion.get("category_tags") or [])
+                    for assertion in assertions
+                )
+            }
+            for category in sorted(required - covered_topics):
                 issues.append(
                     {
                         "code": "POSSIBLE_MISSING_CATEGORY",
@@ -1027,8 +1012,11 @@ class WorkflowEngine:
         self, store: RunStore, state: dict[str, Any], llm: LLMService, mineru: MinerUService
     ) -> dict[str, Any]:
         """筛选可执行规则，并从法规知识目录召回相关条款单元。"""
+        from app.repositories.postgres.knowledge_repository import PostgresKnowledgeRepository
+        from app.repositories.postgres.rule_repository import PostgresRuleRepository
+
         config = self.config.get("rules", {})
-        rules = get_rule_repository(Path(get_settings().data_dir)).applicable_rules(state["scenario"])
+        rules = PostgresRuleRepository(Path(get_settings().data_dir)).applicable_rules(state["scenario"])
         rule_source = "RuleRepository"
         view_text = json.dumps(self._previous(store, "build_scene_view"), ensure_ascii=False)
         matched = search_rules(
@@ -1042,29 +1030,28 @@ class WorkflowEngine:
         legal_documents: list[dict[str, Any]] = []
         legal_sources: list[dict[str, Any]] = []
         legal_source_stats = {"included": 0, "excluded_unknown": 0, "excluded_repealed": 0, "excluded_unconfirmed_profile": 0, "excluded_other": 0}
-        knowledge_root = config.get("knowledge_root")
-        if knowledge_root and state["scenario"] == "procurement":
-            root = Path(str(knowledge_root)).expanduser().resolve()
-            for knowledge_path in sorted(root.glob("*/legal_knowledge.json")) if root.is_dir() else []:
-                knowledge = read_json(knowledge_path)
+        if state["scenario"] == "procurement":
+            repository = PostgresKnowledgeRepository(Path(get_settings().data_dir))
+            for knowledge in repository.legal_documents_for_review():
                 document = knowledge.get("legal_document", {})
                 quality = knowledge.get("quality", {})
                 status = document.get("status") or "unknown"
                 extraction = knowledge.get("metadata_extraction", {})
                 profile = document.get("applicability") or {}
                 profile_confirmed = extraction.get("status") == "confirmed" and isinstance(profile, dict)
-                document_key = str(document.get("document_key") or knowledge_path.parent.name)
+                document_key = str(document.get("document_key") or "")
                 fallbacks = []
                 if not document.get("metadata_version"):
                     fallbacks.append("metadata_version defaulted to 1 because the source document has no version")
                 source_identifier = str(document.get("source_storage_key") or document.get("source_file") or document_key)
                 if not document.get("source_storage_key") and not document.get("source_file"):
                     fallbacks.append("source fingerprint uses document_key because no source identifier is stored")
+                content_fingerprint = knowledge.get("content_fingerprint")
                 freeze = {
                     "document_key": document_key,
                     "metadata_version": int(document.get("metadata_version") or 1),
                     "source_fingerprint": "sha256:" + hashlib.sha256(source_identifier.encode("utf-8")).hexdigest(),
-                    "content_fingerprint": "sha256:" + hashlib.sha256(knowledge_path.read_bytes()).hexdigest(),
+                    "content_fingerprint": content_fingerprint or "sha256:" + hashlib.sha256(json.dumps(knowledge, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest(),
                     "fallbacks": fallbacks,
                 }
                 applicability_enabled = self.config.get("legal_applicability", {}).get("enabled", False)
@@ -1239,6 +1226,9 @@ class WorkflowEngine:
         review = self._previous(store, "agent_review")
         global_validation = self._previous(store, "global_validation")
         legal_gate = self._previous(store, "match_legal_applicability")
+        assertions = procurement_assertions(
+            self._previous(store, "build_ledger")["ledgers"].get("procurement", {})
+        )
         block_index = {
             b["block_id"]: {
                 "document_role": role,
@@ -1260,7 +1250,15 @@ class WorkflowEngine:
         rule_index = {str(rule.get("id")): rule for rule in self._previous(store, "match_rules").get("rules", []) if rule.get("id")}
         validator = EvidenceValidationService()
         for index, finding in enumerate(review.get("findings", []), start=1):
+            if missing_element_is_covered(finding, assertions):
+                continue
             finding_for_validation = {**finding}
+            finding_for_validation = _sanitize_legal_candidate(
+                finding_for_validation, _legal_conclusions_allowed(legal_gate)
+            )
+            if finding_for_validation is None:
+                continue
+            finding = finding_for_validation
             if finding.get("finding_type") == "missing_element":
                 title = str(finding.get("title") or "")
                 finding_for_validation["absence_check_verified"] = any(
@@ -1389,6 +1387,7 @@ class WorkflowEngine:
             "task_legal_facts": legal_gate["task_legal_facts"],
             "legal_applicability": legal_gate["decisions"],
             "legal_context_freeze": legal_gate["frozen_context"],
+            "extraction_summary": extraction.get("extraction_summary", {}),
             "findings": evidence["findings"],
             "system_warnings": collect_system_warnings(quality, extraction),
             "human_review_required": True,
@@ -1424,22 +1423,6 @@ def load_formal_skill(skill_dir: Path, include_references: bool = True) -> str:
     return "\n".join(parts)
 
 
-def summarize(value: Any) -> dict[str, Any]:
-    """生成日志用的小摘要，避免把全文写进events.jsonl。"""
-    if not isinstance(value, dict):
-        return {"type": type(value).__name__}
-    summary: dict[str, Any] = {"keys": list(value)[:12]}
-    for key in ("documents", "profiles", "candidates", "ledgers", "quality"):
-        if isinstance(value.get(key), dict):
-            summary[f"{key}_counts"] = {
-                name: len(item) if isinstance(item, (list, dict)) else 1 for name, item in value[key].items()
-            }
-    for key in ("finding_count", "verified_count", "insufficient_count"):
-        if key in value:
-            summary[key] = value[key]
-    return summary
-
-
 def compact_batch_quality(validation: Any) -> dict[str, Any] | None:
     """Do not repeat the full batch-validation report in every model request."""
     if not isinstance(validation, dict):
@@ -1450,6 +1433,86 @@ def compact_batch_quality(validation: Any) -> dict[str, Any] | None:
         if isinstance(issue, dict) and issue.get("code")
     ]
     return {"status": validation.get("status"), "issue_codes": list(dict.fromkeys(codes))}
+
+
+def _is_rate_limited(failure: dict[str, Any] | None) -> bool:
+    return bool(failure and failure.get("rate_limited"))
+
+
+def _is_rate_limited_exception(error: BaseException) -> bool:
+    """在原始异常仍可见时确定限流，不依赖脱敏后的失败文案。"""
+    cause = error.__cause__ or error
+    response = getattr(cause, "response", None)
+    status_code = getattr(cause, "status_code", None) or getattr(response, "status_code", None)
+    if status_code == 429:
+        return True
+    text = f"{type(cause).__name__} {cause}".lower()
+    return any(marker in text for marker in ("rate limit", "ratelimit", "too many requests", "429", "限流"))
+
+
+def _legal_conclusions_allowed(legal_gate: dict[str, Any]) -> bool:
+    """仅允许已完成适用性门禁的状态支撑法规结论。"""
+    if not legal_gate:
+        return False
+    if "execution_status" not in legal_gate and "mode" not in legal_gate:
+        # 兼容旧的单元测试/检查点；正式运行总会写入这两个状态字段。
+        return bool(legal_gate.get("applicable_legal_units"))
+    return (
+        legal_gate.get("mode") == "applicability_gate"
+        and legal_gate.get("execution_status") == "completed"
+        and any(item.get("status") == "applicable" for item in legal_gate.get("decisions", []))
+    )
+
+
+def _sanitize_legal_candidate(
+    finding: dict[str, Any], legal_conclusions_allowed: bool
+) -> dict[str, Any] | None:
+    if legal_conclusions_allowed:
+        return finding
+    if finding.get("finding_type") == "legal_risk" or finding.get("legal_unit_ids"):
+        return {
+            **finding,
+            "finding_type": "evidence_insufficient",
+            "risk_level": "pending",
+            "title": "法规依据待适用性确认的候选线索",
+            "description": "法规适用性尚未确认，该候选仅保留为待人工核验线索。",
+            "rationale": "适用性门禁未完成，不能形成确定性法规结论。",
+            "legal_unit_ids": [],
+            "legal_applicability": "not_assessed",
+            "needs_human_confirmation": True,
+        }
+    return finding
+
+
+def _compact_review_checks(checks: Any) -> list[dict[str, Any]]:
+    """压缩通过项，只保留覆盖证明所需的短记录。"""
+    if not isinstance(checks, list):
+        return []
+    compacted = []
+    for check in checks:
+        if not isinstance(check, dict) or check.get("status") != "pass":
+            compacted.append(check)
+            continue
+        facts = check.get("procurement_facts", [])
+        if isinstance(facts, list):
+            facts = [
+                {
+                    "assertion_id": fact.get("assertion_id"),
+                    "statement": str(fact.get("statement") or "")[:80],
+                    "evidence_block_ids": list(fact.get("evidence_block_ids") or [])[:4],
+                }
+                if isinstance(fact, dict) else str(fact)[:80]
+                for fact in facts[:2]
+            ]
+        compacted.append({
+            "legal_obligation": str(check.get("legal_obligation") or "")[:120],
+            "procurement_facts": facts,
+            "difference": str(check.get("difference") or "")[:120],
+            "status": "pass",
+            "evidence_block_ids": list(check.get("evidence_block_ids") or [])[:4],
+            "legal_unit_ids": list(check.get("legal_unit_ids") or [])[:4],
+        })
+    return compacted
 
 
 def _split_batch_for_output(batch: dict[str, Any], batch_no: int) -> list[dict[str, Any]]:

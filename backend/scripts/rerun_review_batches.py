@@ -10,8 +10,8 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_DIR))
 
 from app.core.config import get_settings
-from app.review_engine.services.procurement.workflow import STEPS, WorkflowEngine
-from app.review_engine.services.runtime import read_json, write_json
+from app.review_engine.procurement.agent_workflow import STEPS, WorkflowEngine
+from app.review_engine.runner import read_json, write_json
 from app.review_engine.settings import load_settings
 from app.services.procurement.review import ProcurementReviewService
 

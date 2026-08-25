@@ -2,7 +2,8 @@ import json
 from pathlib import Path
 
 from app.core.config import get_settings
-from app.review_engine.services.procurement.workflow import WorkflowEngine
+from app.repositories.postgres.knowledge_repository import PostgresKnowledgeRepository
+from app.review_engine.procurement.agent_workflow import WorkflowEngine
 
 
 class Store:
@@ -21,9 +22,12 @@ def test_workflow_retrieves_all_effective_legal_documents_when_gate_is_disabled(
             "quality": {"status": "reviewable"},
             "metadata_extraction": {"status": "confirmed" if effective else "ready"},
         }), encoding="utf-8")
+    repository = PostgresKnowledgeRepository(tmp_path / "data")
+    for path in sorted(root.glob("*/legal_knowledge.json")):
+        repository.upsert_legacy(json.loads(path.read_text(encoding="utf-8")))
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data")); get_settings.cache_clear()
     skills = Path(__file__).parents[1] / "app" / "review_engine" / "skills.json"
-    engine = WorkflowEngine(tmp_path / "runs", skills, {"rules": {"knowledge_root": str(root)}})
+    engine = WorkflowEngine(tmp_path / "runs", skills, {"rules": {}})
     engine._previous = lambda _store, step: {} if step == "build_scene_view" else {"ledgers": {"procurement": [{"statement": "procurement evidence"}]}}
     result = engine._match_rules(Store(), {"scenario": "procurement"}, None, None)
     assert [item["source"]["document_key"] for item in result["legal_documents"]] == ["effective", "effective_unconfirmed"]

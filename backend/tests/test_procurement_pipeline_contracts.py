@@ -1,27 +1,31 @@
 import json
+import json
 from pathlib import Path
+import pytest
 
-from app.review_engine.services.procurement.batching import (
+from app.review_engine.procurement.batching import (
     BatchAssembler, BatchBudget, BatchValidator, LogicalUnitBuilder,
     rows_html, table_business_view, table_rows, token_estimate,
 )
-from app.review_engine.services.procurement.evidence import EvidenceValidationService
-from app.review_engine.services.procurement.ledger import LedgerService
-from app.review_engine.services.procurement.quality import (
+from app.review_engine.procurement.evidence import EvidenceValidationService
+from app.review_engine.procurement.ledger import LedgerService
+from app.review_engine.procurement.quality import (
     QualityCheckService,
     supplement_damaged_table_text,
     table_content_quality_flags,
 )
-from app.review_engine.services.procurement.candidates import (
+from app.review_engine.procurement.candidates import (
     collect_system_warnings, deterministic_hard_facts, extraction_batch_payload,
-    merge_candidate_items, validate_candidate_items,
+    merge_candidate_items, missing_element_is_covered, validate_candidate_items,
 )
-from app.review_engine.services.procurement.structure import (
+from app.review_engine.procurement.structure import (
     deterministic_references, structure_context_for_blocks,
 )
-from app.review_engine.services.procurement.workflow import (
-    PROCUREMENT_EXTRACTION_CONTRACT, REVIEW_TOPICS, WorkflowEngine,
+from app.review_engine.procurement.agent_workflow import (
+    PROCUREMENT_EXTRACTION_CONTRACT, REVIEW_TOPICS, WorkflowEngine, _compact_review_checks,
+    _sanitize_legal_candidate,
 )
+import app.review_engine.procurement.agent_workflow as workflow_module
 
 
 def test_system_quality_warnings_are_separate_and_deduplicated() -> None:
@@ -32,6 +36,223 @@ def test_system_quality_warnings_are_separate_and_deduplicated() -> None:
     )
     assert [item["title"] for item in result] == ["表格未识别", "批次失败"]
     assert all(item["review_scope"] == "system_quality" for item in result)
+
+
+def test_missing_element_reverse_check_uses_all_procurement_assertions() -> None:
+    assertions = [
+        {"statement": "最高响应限价为86万元", "category": "商务报价与付款"},
+        {"statement": "允许联合体投标并提交联合体协议", "category": "资格与实质性条件"},
+        {"statement": "评分标准及评分表见附件", "category": "评审办法与评分"},
+    ]
+    for title in ("缺少预算", "缺少联合体规定", "缺少评审标准"):
+        assert missing_element_is_covered({"finding_type": "missing_element", "title": title}, assertions)
+    assert not missing_element_is_covered(
+        {"finding_type": "missing_element", "title": "缺少履约期限"}, assertions
+    )
+
+
+def test_degraded_legal_gate_downgrades_legal_candidate_without_determination() -> None:
+    result = _sanitize_legal_candidate(
+        {"finding_type": "legal_risk", "title": "违法", "legal_unit_ids": ["L-1"]},
+        False,
+    )
+    assert result["finding_type"] == "evidence_insufficient"
+    assert result["risk_level"] == "pending"
+    assert result["legal_unit_ids"] == []
+    assert "违法" not in result["title"]
+    result = _sanitize_legal_candidate(
+        {
+            "finding_type": "inconsistency",
+            "title": "采购方式与法规条款不一致",
+            "legal_unit_ids": ["L-1"],
+        },
+        False,
+    )
+    assert result["finding_type"] == "evidence_insufficient"
+    assert result["title"] == "法规依据待适用性确认的候选线索"
+    assert result["risk_level"] == "pending"
+
+
+def test_pass_checks_are_compressed_to_short_coverage_proof() -> None:
+    result = _compact_review_checks([{
+        "status": "pass",
+        "legal_obligation": "法规义务" * 100,
+        "difference": "无差异" * 100,
+        "procurement_facts": [
+            {"assertion_id": f"A-{index}", "statement": "事实" * 100, "evidence_block_ids": [f"B-{index}"]}
+            for index in range(10)
+        ],
+        "evidence_block_ids": [f"B-{index}" for index in range(10)],
+        "legal_unit_ids": [f"L-{index}" for index in range(10)],
+    }])[0]
+    assert len(result["procurement_facts"]) == 2
+    assert len(result["legal_obligation"]) <= 120
+    assert len(result["difference"]) <= 120
+    assert all(len(item["statement"]) <= 80 for item in result["procurement_facts"])
+    assert len(result["evidence_block_ids"]) <= 4
+    assert len(result["legal_unit_ids"]) <= 4
+
+
+def test_attachment_topic_sends_only_deterministic_anomalies(tmp_path: Path) -> None:
+    engine = WorkflowEngine(
+        tmp_path / "runs", Path(__file__).parents[1] / "app" / "review_engine" / "skills.json",
+        {"workflow": {"review_workers": 1}},
+    )
+    captured = {}
+
+    class Store:
+        @staticmethod
+        def event(*_args, **_kwargs): return None
+
+    class LLM:
+        @staticmethod
+        def json_call(_step, _prompt, payload):
+            if payload["topic"] == "附件与引用":
+                captured.update(payload)
+            return {"coverage_status": "reviewed", "checks": [], "candidate_findings": []}
+
+    previous = {
+        "build_scene_view": {"topic_views": {topic: [] for topic in REVIEW_TOPICS}},
+        "build_ledger": {"ledgers": {"procurement": {"source_assertions": []}}},
+        "match_legal_applicability": {
+            "mode": "applicability_gate", "execution_status": "degraded",
+            "applicable_legal_units": [], "decisions": [],
+        },
+        "match_rules": {"rules": []},
+        "global_validation": {"issues": []},
+        "structure_profile": {"profiles": {"procurement": {
+            "inventories": {"attachments": [{"block_id": "A-OK", "title": "附件一"}]},
+            "references": [
+                {"reference_text": "附件一", "status": "resolved", "target_block_ids": ["A-OK"]},
+                {"reference_text": "附件二", "status": "unresolved", "target_block_ids": []},
+            ],
+        }}},
+    }
+    engine._previous = lambda _store, step: previous[step]
+    engine._build_compliance_matrix(Store(), {}, LLM(), None)
+
+    assert set(captured["deterministic_leads"]) == {"anomalies"}
+    assert captured["deterministic_leads"]["anomalies"][0]["reference_text"] == "附件二"
+
+
+def test_batch_duration_excludes_worker_queue_time(tmp_path: Path, monkeypatch) -> None:
+    skills = Path(__file__).parents[1] / "app" / "review_engine" / "skills.json"
+    engine = WorkflowEngine(tmp_path / "runs", skills, {"workflow": {"extract_workers": 1}})
+
+    class Store:
+        run_dir = tmp_path
+        @staticmethod
+        def event(*_args, **_kwargs): return None
+
+    class LLM:
+        @staticmethod
+        def json_call(_step, _prompt, payload, **_kwargs):
+            return {"candidate_items": [{
+                "statement": f"第{payload['batch_no']}批供应商须履约",
+                "evidence_block_ids": [f"B-{payload['batch_no']}"],
+                "evidence_quote": f"第{payload['batch_no']}批供应商须履约",
+            }]}
+
+    batches = [
+        {"batch_no": 1, "purpose": "procurement_understanding", "coverage_strategy": "complete_logical_units",
+         "logical_units": [], "blocks": [{"block_id": "B-1", "type": "paragraph", "page": 1,
+                                             "text": "第1批供应商须履约", "role": "primary"}]},
+        {"batch_no": 2, "purpose": "procurement_understanding", "coverage_strategy": "complete_logical_units",
+         "logical_units": [], "blocks": [{"block_id": "B-2", "type": "paragraph", "page": 2,
+                                             "text": "第2批供应商须履约", "role": "primary"}]},
+    ]
+    previous = {
+        "assemble_review_batches": {"manifests": {"procurement": {
+            "validation": {"status": "passed"}, "batches": batches,
+        }}},
+        "structure_profile": {"profiles": {"procurement": {}}},
+    }
+    engine._previous = lambda _store, step: previous[step]
+    fake_clock = iter((0.0, 10.0, 10.0, 11.0))
+    monkeypatch.setattr(workflow_module.time, "perf_counter", lambda: next(fake_clock))
+
+    result = engine._extract_candidates(Store(), {}, LLM(), None)
+    reports = result["batch_reports"]["procurement"]
+    assert [report["duration_seconds"] for report in reports] == [10.0, 1.0]
+    assert reports[1]["cache_reused"] is False
+
+
+def test_extraction_output_metrics_keep_raw_normalized_and_cached_values(tmp_path: Path) -> None:
+    skills = Path(__file__).parents[1] / "app" / "review_engine" / "skills.json"
+    engine = WorkflowEngine(tmp_path / "runs", skills, {"workflow": {"extract_workers": 1}})
+
+    class Store:
+        run_dir = tmp_path
+
+        @staticmethod
+        def event(*_args, **_kwargs): return None
+
+    model_response = {"candidate_items": [
+        {
+            "statement": "供应商须提供营业执照",
+            "evidence_block_ids": ["B-1"],
+            "evidence_quote": "供应商须提供营业执照",
+        },
+        None,
+    ]}
+
+    class LLM:
+        calls = 0
+
+        @classmethod
+        def json_call(cls, _step, _prompt, _payload, **_kwargs):
+            cls.calls += 1
+            return model_response
+
+    batch = {
+        "batch_no": 1,
+        "purpose": "procurement_understanding",
+        "coverage_strategy": "complete_logical_units",
+        "logical_units": [],
+        "blocks": [{
+            "block_id": "B-1", "type": "paragraph", "page": 1,
+            "text": "供应商须提供营业执照", "role": "primary",
+        }],
+    }
+    previous = {
+        "assemble_review_batches": {"manifests": {"procurement": {
+            "validation": {"status": "passed"}, "batches": [batch],
+        }}},
+        "structure_profile": {"profiles": {"procurement": {}}},
+    }
+    engine._previous = lambda _store, step: previous[step]
+
+    result = engine._extract_candidates(Store(), {}, LLM(), None)
+    report = result["batch_reports"]["procurement"][0]
+    checkpoint_path = tmp_path / "batch_artifacts" / "extract_candidates" / "procurement_001.json"
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    normalized = json.dumps([*checkpoint["accepted"], *checkpoint["rejected"]], ensure_ascii=False)
+
+    assert LLM.calls == 1
+    assert checkpoint["model_output_characters"] == len(json.dumps(model_response, ensure_ascii=False))
+    assert checkpoint["model_output_tokens"] == token_estimate(json.dumps(model_response, ensure_ascii=False))
+    assert checkpoint["normalized_output_characters"] == len(normalized)
+    assert checkpoint["normalized_output_tokens"] == token_estimate(normalized)
+    assert checkpoint["model_output_characters"] != checkpoint["normalized_output_characters"]
+    assert report["model_output_characters"] == checkpoint["model_output_characters"]
+    assert report["normalized_output_characters"] == checkpoint["normalized_output_characters"]
+    assert report["output_characters"] == checkpoint["model_output_characters"]
+    assert result["extraction_summary"]["max_duration_seconds"] == report["duration_seconds"]
+    assert result["extraction_summary"]["total_model_output_characters"] == checkpoint["model_output_characters"]
+    assert result["extraction_summary"]["total_normalized_output_characters"] == checkpoint["normalized_output_characters"]
+
+    class NoCallLLM:
+        @staticmethod
+        def json_call(*_args, **_kwargs):
+            raise AssertionError("缓存复用不应再次调用模型")
+
+    cached_result = engine._extract_candidates(Store(), {}, NoCallLLM(), None)
+    cached_report = cached_result["batch_reports"]["procurement"][0]
+    assert cached_report["reused"] is True
+    assert cached_report["cache_reused"] is True
+    assert cached_report["model_output_characters"] == checkpoint["model_output_characters"]
+    assert cached_report["normalized_output_characters"] == checkpoint["normalized_output_characters"]
+    assert cached_result["extraction_summary"]["total_model_output_characters"] == checkpoint["model_output_characters"]
 
 
 def test_compliance_matrix_reviews_all_seven_topics_and_builds_candidates(tmp_path: Path) -> None:
@@ -244,6 +465,7 @@ def test_attachment_target_may_be_a_paragraph_block() -> None:
     assert not any(issue["code"] == "ATTACHMENT_REQUIRED_MISSING" for issue in report["issues"])
 
 
+@pytest.mark.skip(reason="质量检查不再触发 Hybrid/OCR 重解析")
 def test_table_structure_failure_retries_with_high_effort_hybrid(tmp_path: Path) -> None:
     skills = Path(__file__).parents[1] / "app" / "review_engine" / "skills.json"
     engine = WorkflowEngine(tmp_path / "runs", skills)
@@ -277,6 +499,7 @@ def test_table_structure_failure_retries_with_high_effort_hybrid(tmp_path: Path)
     }]
 
 
+@pytest.mark.skip(reason="质量检查不再触发 Hybrid/OCR 重解析")
 def test_empty_table_routes_directly_to_page_ocr(tmp_path: Path) -> None:
     skills = Path(__file__).parents[1] / "app" / "review_engine" / "skills.json"
     engine = WorkflowEngine(tmp_path / "runs", skills)
@@ -315,6 +538,7 @@ def test_empty_table_routes_directly_to_page_ocr(tmp_path: Path) -> None:
     assert report["retry"]["attempts"][0]["accepted"] is True
 
 
+@pytest.mark.skip(reason="质量检查不再触发 Hybrid/OCR 重解析")
 def test_structure_only_table_uses_hybrid_then_ocr_if_needed(tmp_path: Path) -> None:
     skills = Path(__file__).parents[1] / "app" / "review_engine" / "skills.json"
     engine = WorkflowEngine(tmp_path / "runs", skills)
@@ -615,7 +839,28 @@ def test_batches_limit_primary_blocks_and_estimated_candidates() -> None:
     assert all(batch["candidate_estimate"] <= 20 for batch in batches["batches"])
 
 
-def test_business_understanding_receives_batch_structure_context(tmp_path: Path) -> None:
+def test_dense_continuation_table_inherits_adjacent_header_for_safe_split() -> None:
+    header = "<table><tr><td>序号</td><td>评审项目</td><td>评审标准</td></tr><tr><td>1</td><td>前项</td><td>供应商须满足</td></tr></table>"
+    continuation = "<table>" + "".join(
+        f"<tr><td colspan='2'>{index}</td><td>供应商须提供第{index}项证明材料</td></tr>"
+        for index in range(1, 31)
+    ) + "</table>"
+    logical = LogicalUnitBuilder().build(document([
+        {"block_id": "B-header", "block_type": "table", "page_no": 1, "reading_order": 1,
+         "heading_path": ["评分办法"], "text": header, "source": {"table_html": header}},
+        {"block_id": "B-cont", "block_type": "table", "page_no": 2, "reading_order": 2,
+         "heading_path": ["评分办法"], "text": continuation, "source": {"table_html": continuation}},
+    ]))
+    budget = BatchBudget(28_000, 8_000, 1_500, 3_000, 40, 25, 24)
+    batches = BatchAssembler(budget).assemble(logical)
+    validation = BatchValidator().validate(logical, batches)
+    continuation_batches = [batch for batch in batches["batches"] if "B-cont" in batch["primary_block_ids"]]
+    assert validation["status"] == "passed"
+    assert len(continuation_batches) == 2
+    assert all(batch["table_row_count"] <= 24 for batch in continuation_batches)
+
+
+def test_business_understanding_uses_deterministic_section_context(tmp_path: Path) -> None:
     skills = Path(__file__).parents[1] / "app" / "review_engine" / "skills.json"
     engine = WorkflowEngine(tmp_path / "runs", skills, {"workflow": {
         "rerun_batches": [1], "rerun_output_tokens": 5_000, "rerun_stream": False,
@@ -659,22 +904,12 @@ def test_business_understanding_receives_batch_structure_context(tmp_path: Path)
                 }
             }
         },
-        "structure_profile": {
-            "profiles": {
-                "procurement": {
-                    "quality_status": "passed",
-                    "section_responsibilities": [{"block_id": "B-1", "responsibility": "资格与实质性条件"}],
-                    "references": [{"source_block_ids": ["B-1"], "target_block_ids": ["B-8"]}],
-                }
-            }
-        },
     }
     engine._previous = lambda _store, step: previous[step]
     engine._extract_candidates(Store(), {}, LLM(), None)
     assert "logical_units" not in captured
-    assert captured["structure_context"] == {
-        "references": [{"source_block_ids": ["B-1"], "target_block_ids": ["B-8"]}],
-    }
+    assert "structure_context" not in captured
+    assert captured["section_context"] == {"paths": [], "category_hints": []}
     assert captured["blocks"][0]["r"] == "primary"
     assert captured["blocks"][0]["tf"]["row_start"] == 1
     assert captured["max_tokens"] == 5_000
@@ -767,11 +1002,14 @@ def test_one_failed_extraction_batch_does_not_abort_other_batches(tmp_path: Path
         @staticmethod
         def event(*_args, **_kwargs): return None
 
+    class RateLimitError(RuntimeError):
+        status_code = 429
+
     class LLM:
         @staticmethod
         def json_call(_step, _prompt, payload, **_kwargs):
             if payload["batch_no"] == 1:
-                raise RuntimeError("LLM call failed")
+                raise RateLimitError("temporary upstream failure")
             return {"candidate_items": [{
                 "statement": "供应商须按期履约", "evidence_block_ids": ["B-2"], "evidence_quote": "供应商须按期履约",
             }]}
@@ -793,6 +1031,18 @@ def test_one_failed_extraction_batch_does_not_abort_other_batches(tmp_path: Path
     assert result["status"] == "degraded"
     assert [item["statement"] for item in result["candidates"]["procurement"]] == ["供应商须按期履约"]
     assert [report["status"] for report in result["batch_reports"]["procurement"]] == ["degraded", "completed"]
+    assert result["extraction_summary"]["batch_count"] == 2
+    assert result["extraction_summary"]["failure_count"] == 1
+    assert result["extraction_summary"]["rate_limited_count"] == 1
+    assert result["batch_reports"]["procurement"][0]["rate_limited"] is True
+    checkpoint = json.loads((tmp_path / "batch_artifacts" / "extract_candidates" / "procurement_001.json").read_text(encoding="utf-8"))
+    assert checkpoint["rate_limited"] is True and checkpoint["failure"]["rate_limited"] is True
+    assert 0 < result["extraction_summary"]["failure_rate"] <= 1
+    assert all(
+        {"duration_seconds", "input_tokens", "output_characters", "failure_code", "rate_limited"}
+        <= report.keys()
+        for report in result["batch_reports"]["procurement"]
+    )
     assert result["extraction_findings"][0]["risk_level"] == "unknown"
 
 

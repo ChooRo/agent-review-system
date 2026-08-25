@@ -1,0 +1,21 @@
+services:
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: xiamen-celery-worker
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://host.docker.internal:6379/0
+      DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:5432/xiamen_tobacco
+      MINERU_API_URL: http://host.docker.internal:8001
+      STORAGE_BACKEND: postgres
+      DATA_DIR: /app/data
+      UPLOADS_DIR: /app/data/uploads
+      REVIEW_RUNS_ROOT: /runs
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/app/data
+      - ./review_config.json:/app/review_config.json:ro
+      - ../runs:/runs

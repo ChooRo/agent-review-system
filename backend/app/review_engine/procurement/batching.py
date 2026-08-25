@@ -200,13 +200,13 @@ def table_business_view_from_rows(
     records = [row for row in rows if not row.get("is_header")]
     if not headers or not records:
         return None
-    width = len(rows[0]["cells"])
+    width = max(len(row.get("cells", [])) for row in rows)
     columns: list[str] = []
     used: dict[str, int] = {}
     for column in range(width):
         parts: list[str] = []
         for row in headers:
-            value = str(row["cells"][column] or "").strip()
+            value = str((row.get("cells") or [])[column] if column < len(row.get("cells") or []) else "").strip()
             if value and value not in parts:
                 parts.append(value)
         base = " / ".join(parts) or f"第{column + 1}列"
@@ -226,7 +226,7 @@ def table_business_view_from_rows(
         "records": [
             {
                 "row": row["row_index"],
-                "values": {columns[index]: value for index, value in enumerate(row["cells"])},
+                "values": {columns[index]: value for index, value in enumerate(row.get("cells", []))},
                 **({"inherited_columns": row["inherited_columns"]} if row.get("inherited_columns") else {}),
                 **({"spans": [cell for cell in row.get("spans", [])
                                if cell.get("rowspan", 1) > 1 or cell.get("colspan", 1) > 1]}
@@ -336,6 +336,7 @@ class LogicalUnitBuilder:
 
         block_owner = {block_id: unit["unit_id"] for unit in units for block_id in unit["primary_block_ids"]}
         self._bind_context(units, blocks, block_owner)
+        self._inherit_continuation_table_headers(units)
         return {
             "schema_version": 2,
             "document_id": document.get("document_id"),
@@ -344,6 +345,47 @@ class LogicalUnitBuilder:
             "block_owner": block_owner,
             "excluded_block_ids": [block.get("block_id") for block in source_blocks if not self._reviewable(block)],
         }
+
+    @staticmethod
+    def _inherit_continuation_table_headers(units: list[dict[str, Any]]) -> None:
+        """Carry forward an omitted header only across an adjacent table sequence.
+
+        MinerU may emit a continuation page as a new table block without the
+        repeated header row.  The header is evidence from the immediately
+        preceding table sequence, not a guessed replacement for malformed data.
+        """
+        header_context: dict[str, Any] | None = None
+        previous_table: dict[str, Any] | None = None
+        for unit in units:
+            if unit.get("unit_type") != "table_unit":
+                header_context = None
+                previous_table = None
+                continue
+            rows = unit.get("table_rows", [])
+            if not rows:
+                header_context = None
+                previous_table = None
+                continue
+            headers = [row for row in rows if row.get("is_header")]
+            if headers:
+                header_context = {
+                    "rows": headers,
+                    "block": next(
+                        (dict(block) for block in unit.get("blocks", [])
+                         if block.get("role") == "primary" and block.get("type") == "table"),
+                        None,
+                    ),
+                }
+            elif (
+                header_context
+                and previous_table
+                and unit.get("page_range", [0])[0] <= previous_table.get("page_range", [0, 0])[1] + 1
+                and (unit.get("heading_path") or [])[:1] == (previous_table.get("heading_path") or [])[:1]
+                and rows
+            ):
+                unit["table_header_context"] = header_context
+                unit["risks"] = [risk for risk in unit.get("risks", []) if risk != "table_header_unresolved"]
+            previous_table = unit
 
     @staticmethod
     def _reviewable(block: dict[str, Any]) -> bool:
@@ -658,11 +700,23 @@ class BatchAssembler:
         if any(row.get("block_id") != table_block["block_id"] for row in rows):
             return []
         headers = [row for row in rows if row.get("is_header")]
+        header_context = unit.get("table_header_context") or {}
+        if not headers:
+            headers = [dict(row) for row in header_context.get("rows", [])]
         data_rows = [row for row in rows if not row.get("is_header")]
         if not headers or not data_rows:
             return []
 
         context = [dict(block) for block in unit.get("blocks", []) if block.get("role") != "primary"]
+        header_block = header_context.get("block")
+        if header_block:
+            context.insert(0, {
+                **header_block,
+                "role": "repeated_context",
+                "text": "表头上下文：\n" + "\n".join(row["text"] for row in headers),
+                "table_html": rows_html(headers, []),
+                "table_fragment": {"header_only": True, "source_block_id": header_block.get("block_id")},
+            })
         auxiliary = [
             dict(block) for block in unit.get("blocks", [])
             if block.get("role") == "primary" and block.get("type") != "table"

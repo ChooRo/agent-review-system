@@ -3,8 +3,8 @@ import json
 import httpx
 import pytest
 
-from app.review_engine.services.llm import LLMService
-from app.review_engine.services.runtime import RunStore
+from app.integrations.llm import LLMService
+from app.review_engine.runner import RunStore
 
 
 def test_llm_uses_openai_compatible_httpx_endpoint(tmp_path, monkeypatch) -> None:
@@ -16,7 +16,7 @@ def test_llm_uses_openai_compatible_httpx_endpoint(tmp_path, monkeypatch) -> Non
             calls.append((path, json, headers))
             return httpx.Response(200, request=httpx.Request("POST", "https://example.test/v1/chat/completions"), json={"choices": [{"message": {"content": '{"answer":"ok"}'}, "finish_reason": "stop"}]})
 
-    monkeypatch.setattr("app.review_engine.services.llm.httpx.Client", Client)
+    monkeypatch.setattr("app.integrations.llm.httpx.Client", Client)
     result = LLMService({"api_url": "https://example.test/v1", "api_key": "test-key", "model": "test-model"}, RunStore(tmp_path)).json_call("smoke", "return JSON", {"input": 1})
     assert result == {"answer": "ok"}
     assert calls[0][0] == "/chat/completions"
@@ -44,8 +44,8 @@ def test_llm_retries_only_transient_failures(tmp_path, monkeypatch, failure) -> 
                 return httpx.Response(failure, request=request)
             return httpx.Response(200, request=request, json={"choices": [{"message": {"content": '{"answer":"ok"}'}}]})
 
-    monkeypatch.setattr("app.review_engine.services.llm.httpx.Client", Client)
-    monkeypatch.setattr("app.review_engine.services.llm.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("app.integrations.llm.httpx.Client", Client)
+    monkeypatch.setattr("app.integrations.llm.time.sleep", lambda _seconds: None)
     service = LLMService({"api_url": "https://example.test/v1", "api_key": "test-key", "model": "test-model", "max_retries": 1}, RunStore(tmp_path))
 
     assert service.json_call("retry", "return JSON", {}) == {"answer": "ok"}
@@ -63,7 +63,7 @@ def test_llm_does_not_retry_permanent_failures(tmp_path, monkeypatch) -> None:
                 400, request=httpx.Request("POST", "https://example.test/v1/chat/completions")
             )
 
-    monkeypatch.setattr("app.review_engine.services.llm.httpx.Client", Client)
+    monkeypatch.setattr("app.integrations.llm.httpx.Client", Client)
     service = LLMService({"api_url": "https://example.test/v1", "api_key": "test-key", "model": "test-model", "max_retries": 1}, RunStore(tmp_path))
 
     with pytest.raises(RuntimeError):
@@ -84,7 +84,7 @@ def test_llm_retries_truncated_json_then_raises(tmp_path, monkeypatch) -> None:
                 json={"choices": [{"message": {"content": '{"answer":'}, "finish_reason": "length"}]},
             )
 
-    monkeypatch.setattr("app.review_engine.services.llm.httpx.Client", Client)
+    monkeypatch.setattr("app.integrations.llm.httpx.Client", Client)
     service = LLMService({"api_url": "https://example.test/v1", "api_key": "test-key", "model": "test-model", "max_retries": 1}, RunStore(tmp_path))
 
     with pytest.raises(RuntimeError):
@@ -121,7 +121,7 @@ def test_llm_streams_json_with_output_limit_and_batch_trace(tmp_path, monkeypatc
             calls.append((method, path, json, timeout))
             return StreamResponse()
 
-    monkeypatch.setattr("app.review_engine.services.llm.httpx.Client", Client)
+    monkeypatch.setattr("app.integrations.llm.httpx.Client", Client)
     result = LLMService(
         {"api_url": "https://example.test/v1", "api_key": "test-key", "model": "test-model"},
         RunStore(tmp_path),

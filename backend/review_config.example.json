@@ -10,7 +10,7 @@
   "ocr": {
     "api_url": "",
     "api_key": "",
-    "model": "deepseek-ai/DeepSeek-OCR",
+    "model": "",
     "timeout_seconds": 120
   },
   "llm": {
@@ -21,14 +21,13 @@
     "max_retries": 2
   },
   "rules": {
-    "path": null,
-    "knowledge_root": "../knowledge/rules"
+    "path": null
   },
   "legal_applicability": {
     "enabled": true
   },
   "workflow": {
-    "extract_workers": 2,
+    "extract_workers": 6,
     "model_tokens": 28000,
     "output_tokens": 5000,
     "safety_tokens": 1500,

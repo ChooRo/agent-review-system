@@ -5,7 +5,7 @@
 
   cd backend
   $env:STORAGE_BACKEND='postgres'
-  $env:DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:5432/xiamen_tobacco'
+  $env:DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:5432/xiamen_tobacco_test'
   uv run --no-sync pytest tests/test_postgres_repository.py -q
 
 表结构需已由 `uv run --no-sync alembic upgrade head` 建好；测试前后清空相关表。
@@ -20,7 +20,7 @@ from psycopg import connect
 
 from app.core.auth_store import get_auth_store
 from app.core.config import get_settings
-from app.repositories.backend import get_review_repository
+from app.repositories.postgres.review_repository import PostgresReviewRepository
 from app.repositories.postgres.db import transaction
 
 COLLECTIONS = ("projects", "tasks", "findings", "comments", "events", "audit", "idempotency")
@@ -62,7 +62,7 @@ def _project(item_id: str) -> dict:
 
 
 def test_postgres_collection_round_trip(tmp_path) -> None:
-    repo = get_review_repository(tmp_path)
+    repo = PostgresReviewRepository(tmp_path)
     projects = repo.collection("projects")
     projects.write({"items": [_project("prj_a"), _project("prj_b")]})
     items = repo.collection("projects").read()["items"]
@@ -71,8 +71,29 @@ def test_postgres_collection_round_trip(tmp_path) -> None:
     assert items[0]["project_owner"] == "经办"
 
 
+def test_postgres_collection_write_preserves_unrelated_rows(tmp_path) -> None:
+    repo = PostgresReviewRepository(tmp_path)
+    repo.collection("projects").write({"items": [_project("prj_a"), _project("prj_b")]})
+    repo.collection("tasks").write({"items": [{
+        "id": "prt_keep", "project_id": "prj_b", "title": "保留任务", "status": "draft",
+        "version": 1, "progress": 0, "created_at": "2026-08-19T00:00:00+00:00",
+        "updated_at": "2026-08-19T00:00:00+00:00", "members": [], "document_versions": [],
+    }]})
+    with transaction() as conn:
+        conn.execute(
+            "INSERT INTO events (id, task_id, actor_id, at, before_status, after_status, reason) "
+            "VALUES ('evt_keep', 'prt_keep', 0, '2026-08-19T00:00:00+00:00', NULL, 'draft', '保留')"
+        )
+    changed = repo.collection("projects").read()["items"]
+    changed[0]["name"] = "更新后的项目"
+    repo.collection("projects").write({"items": changed})
+    with transaction() as conn:
+        assert conn.execute("SELECT count(*) AS count FROM projects").fetchone()["count"] == 2
+        assert conn.execute("SELECT reason FROM events WHERE id='evt_keep'").fetchone()["reason"] == "保留"
+
+
 def test_postgres_transaction_atomic(tmp_path) -> None:
-    repo = get_review_repository(tmp_path)
+    repo = PostgresReviewRepository(tmp_path)
     repo.collection("projects").write({"items": [_project("prj_a")]})
 
     def persist(state):
@@ -88,7 +109,7 @@ def test_postgres_transaction_atomic(tmp_path) -> None:
 
 
 def test_postgres_concurrent_transactions_do_not_lose_updates(tmp_path) -> None:
-    repo = get_review_repository(tmp_path)
+    repo = PostgresReviewRepository(tmp_path)
     repo.collection("projects").write({"items": [_project("prj_base")]})
     # advisory 锁使读-改-写按集合串行化：第二个事务拿到锁后才读取，因此
     # 必须在锁外起跑，否则持锁等 barrier 会与等锁的事务互相死等。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sys
 from datetime import UTC, datetime
@@ -14,30 +15,33 @@ PROJECT_ROOT = BACKEND_ROOT.parent
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.repositories.knowledge_repository import KnowledgeRepository
+from app.core.config import get_settings
+from app.integrations.storage.local import LocalStorage
+from app.repositories.postgres.knowledge_repository import PostgresKnowledgeRepository
 
 
 class CleanupError(RuntimeError):
     pass
 
 
-def knowledge_root() -> Path:
-    return PROJECT_ROOT / "knowledge" / "rules"
+def repository() -> PostgresKnowledgeRepository:
+    settings = get_settings()
+    return PostgresKnowledgeRepository(Path(settings.data_dir), LocalStorage(settings.uploads_dir))
 
 
-def plan(root: Path, keys: set[str]) -> list[Path]:
-    repository = KnowledgeRepository(root)
-    paths = []
+def plan(keys: set[str]) -> list[dict]:
+    store = repository()
+    documents = []
     missing = []
     for key in keys:
-        found = repository._path_and_value(key)
-        if not found:
+        value = store.get_document(key)
+        if not value:
             missing.append(key)
         else:
-            paths.append(found[0].parent)
+            documents.append(value)
     if missing:
         raise CleanupError(f"document_key does not exist: {', '.join(sorted(missing))}")
-    return paths
+    return documents
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -45,38 +49,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--list", action="store_true", help="List uploaded legal documents without changing data.")
     parser.add_argument("--document-key", action="append", default=[], help="Exact document key; may be repeated.")
     parser.add_argument("--confirm", action="store_true", help="Actually delete after backup.")
-    parser.add_argument("--knowledge-dir", type=Path, default=knowledge_root(), help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    root = args.knowledge_dir.resolve()
-    repository = KnowledgeRepository(root)
+    store = repository()
     if args.list:
         if args.document_key:
             parser.error("--list cannot be combined with --document-key")
-        for item in repository.list_documents():
+        for item in store.list_documents():
             print(f"{item['document_key']}\t{item['status']}\t{item['title']}")
         return 0
     if not args.document_key:
         parser.error("provide --list or at least one exact --document-key")
     try:
-        paths = plan(root, set(args.document_key))
+        documents = plan(set(args.document_key))
         print("DRY-RUN" if not args.confirm else "DELETE")
         print("document_keys:", ", ".join(sorted(args.document_key)))
-        print("directories:", len(paths))
+        print("documents:", len(documents))
         if not args.confirm:
             return 0
         backup = BACKEND_ROOT / "data" / "backups" / f"delete_legal_{datetime.now(UTC):%Y%m%dT%H%M%SZ}_{uuid4().hex[:8]}"
-        moved = []
+        backup.mkdir(parents=True, exist_ok=True)
+        (backup / "legal_documents.json").write_text(json.dumps(documents, ensure_ascii=False, indent=2), encoding="utf-8")
         try:
-            for source in paths:
-                destination = backup / source.name
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(source), str(destination))
-                moved.append((source, destination))
+            for document in documents:
+                if not store.delete_document(document["legal_document"]["document_key"]):
+                    raise CleanupError(f"document disappeared during deletion: {document['legal_document']['document_key']}")
         except Exception as exc:
-            for source, destination in reversed(moved):
-                if destination.exists():
-                    shutil.move(str(destination), str(source))
-            raise CleanupError(f"delete failed; restored documents: {exc}") from exc
+            raise CleanupError(f"delete failed; metadata backup: {backup}: {exc}") from exc
         print(f"Deleted. Recovery backup: {backup}")
         return 0
     except CleanupError as exc:

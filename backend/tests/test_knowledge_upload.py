@@ -1,11 +1,13 @@
 import json
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from app.core.config import get_settings
 from app.main import app
-from app.repositories.knowledge_repository import KnowledgeRepository
+from app.integrations.storage.local import LocalStorage
+from app.repositories.postgres.knowledge_repository import PostgresKnowledgeRepository
 from app.services.legal import knowledge as knowledge_service_module
 from app.services.legal.knowledge import KnowledgeService
 
@@ -39,13 +41,13 @@ class FakeMetadataLLM:
         return {"applicability": {"activities": [{"value": "采购活动", "evidence": [{"legal_unit_id": source["legal_unit_id"], "quote": source["text"]}]}]}}
 
 
-def setup_upload_service(tmp_path: Path, monkeypatch) -> tuple[TestClient, Path, Path]:
-    data_dir, knowledge_root = tmp_path / "data", tmp_path / "knowledge" / "rules"
+def setup_upload_service(tmp_path: Path, monkeypatch) -> tuple[TestClient, Path, KnowledgeService]:
+    data_dir = tmp_path / "data"
     monkeypatch.setenv("DATA_DIR", str(data_dir)); monkeypatch.setenv("MINERU_API_URL", "http://127.0.0.1:8001"); get_settings.cache_clear()
-    service = KnowledgeService(); service.repository = KnowledgeRepository(knowledge_root, data_dir)
+    service = KnowledgeService(); service.repository = PostgresKnowledgeRepository(data_dir, LocalStorage(data_dir / "uploads"))
     app.dependency_overrides[KnowledgeService] = lambda: service
     monkeypatch.setattr(knowledge_service_module, "ingest_legal_document", fake_ingest)
-    return TestClient(app), data_dir, knowledge_root
+    return TestClient(app), data_dir, service
 
 
 def upload(client: TestClient, headers: dict[str, str], department: str, **extra) -> dict:
@@ -55,26 +57,33 @@ def upload(client: TestClient, headers: dict[str, str], department: str, **extra
         files={"file": ("law.pdf", b"%PDF-1.4\nbody", "application/pdf")},
     )
     assert response.status_code == 200, response.text
-    return response.json()
+    task = response.json()
+    task_id = task.get("task_id") or task["id"]
+    for _ in range(100):
+        task = client.get(f"/api/v1/knowledge/documents/tasks/{task_id}", headers=headers).json()
+        if task["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.01)
+    assert task["status"] == "completed", task
+    assert task.get("result"), task
+    return task["result"]
 
 
 def test_document_metadata_permissions_visibility_and_optimistic_lock(tmp_path, monkeypatch) -> None:
-    client, _data_dir, root = setup_upload_service(tmp_path, monkeypatch)
+    client, _data_dir, service = setup_upload_service(tmp_path, monkeypatch)
     try:
         admin, _ = login(client, "admin"); operator, _ = login(client, "operator")
         supervisor, supervisor_user = login(client, "supervisor"); other, _ = login(client, "legal_supervisor")
         item = upload(client, admin, supervisor_user["department"], status="effective")
         assert item["status"] == "unknown" and item["document_version"] == "2026.1" and item["metadata_version"] == 1
-        assert (root / "law_test" / "original.pdf").is_file() and (root / "law_test" / "legal_knowledge.json").is_file()
+        assert (service.repository.storage.root / "legal" / "law_test" / "original.pdf").is_file()
         assert client.get("/api/v1/knowledge", headers=operator).json() == []
         assert client.get("/api/v1/knowledge", headers=admin).json()[0]["status"] == "unknown"
         assert client.get("/api/v1/knowledge", headers=supervisor).json() == []
         assert client.get("/api/v1/knowledge/law_test", headers=operator).status_code == 404
         assert client.patch("/api/v1/knowledge/documents/law_test", headers=supervisor, json={"metadata_version": 1, "status": "effective"}).status_code == 403
         assert client.patch("/api/v1/knowledge/documents/law_test", headers=other, json={"metadata_version": 1, "applicable_scope": "x"}).status_code == 403
-        stored_path = root / "law_test" / "legal_knowledge.json"
-        stored_value = json.loads(stored_path.read_text(encoding="utf-8")); stored_value["metadata_extraction"]["status"] = "ready"
-        stored_path.write_text(json.dumps(stored_value), encoding="utf-8")
+        service.repository.update_document("law_test", lambda value: value["metadata_extraction"].update({"status": "ready"}))
         effective = client.patch("/api/v1/knowledge/documents/law_test", headers=admin, json={"metadata_version": 1, "status": "effective", "effective_date": "2026-01-01", "applicable_scope": "procurement"})
         assert effective.status_code == 200 and effective.json()["status"] == "effective" and effective.json()["metadata_version"] == 2
         assert client.get("/api/v1/knowledge", headers=operator).json()[0]["document_key"] == "law_test"
@@ -83,7 +92,7 @@ def test_document_metadata_permissions_visibility_and_optimistic_lock(tmp_path, 
         repealed = client.patch("/api/v1/knowledge/documents/law_test", headers=admin, json={"metadata_version": 2, "status": "repealed"})
         assert repealed.status_code == 200 and repealed.json()["status"] == "repealed"
         assert client.get("/api/v1/knowledge", headers=operator).json() == []
-        stored = json.loads((root / "law_test" / "legal_knowledge.json").read_text(encoding="utf-8"))
+        stored = service.repository.get_document("law_test")
         assert len(stored["metadata_history"]) == 2 and stored["legal_document"]["metadata_version"] == 3
         assert client.get("/api/v1/knowledge/rules", headers=operator).json() == []
     finally:
@@ -91,7 +100,7 @@ def test_document_metadata_permissions_visibility_and_optimistic_lock(tmp_path, 
 
 
 def test_knowledge_upload_rejects_non_admin_invalid_duplicate_and_parse_failure(tmp_path, monkeypatch) -> None:
-    client, data_dir, root = setup_upload_service(tmp_path, monkeypatch)
+    client, data_dir, service = setup_upload_service(tmp_path, monkeypatch)
     try:
         admin, admin_user = login(client, "admin"); operator, _ = login(client, "operator"); supervisor, _ = login(client, "supervisor")
         file = {"file": ("law.pdf", b"%PDF-1.4", "application/pdf")}
@@ -101,25 +110,35 @@ def test_knowledge_upload_rejects_non_admin_invalid_duplicate_and_parse_failure(
         upload(client, admin, admin_user["department"])
         assert client.post("/api/v1/knowledge/documents", headers=admin, files=file).status_code == 409
         monkeypatch.setattr(knowledge_service_module, "ingest_legal_document", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("parser unavailable")))
-        assert client.post("/api/v1/knowledge/documents", headers=admin, data={"title": "Other law"}, files=file).status_code == 502
-        assert sorted(path.name for path in root.iterdir()) == ["law_test"]
+        other_file = {"file": ("other-law.pdf", b"%PDF-1.4 other", "application/pdf")}
+        failed_response = client.post("/api/v1/knowledge/documents", headers=admin, data={"title": "Other law"}, files=other_file)
+        assert failed_response.status_code == 200
+        failed_task_id = failed_response.json().get("task_id") or failed_response.json()["id"]
+        for _ in range(100):
+            failed_task = client.get(f"/api/v1/knowledge/documents/tasks/{failed_task_id}", headers=admin).json()
+            if failed_task["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.01)
+        assert failed_task["status"] == "failed"
+        assert "parser unavailable" in failed_task["error"]
+        assert service.repository.get_document("law_test") is not None
         temporary = data_dir / "knowledge_ingest"
-        assert not temporary.exists() or not any(temporary.iterdir())
+        # Failed asynchronous tasks retain their source until manual retry or
+        # task-expiry cleanup; deleting it here would make retry impossible.
+        assert temporary.exists() and any(temporary.iterdir())
     finally:
         app.dependency_overrides.clear(); get_settings.cache_clear()
 
 
 def test_metadata_extraction_requires_admin_and_confirmation_propagates_units(tmp_path, monkeypatch) -> None:
-    client, _data_dir, root = setup_upload_service(tmp_path, monkeypatch)
+    client, _data_dir, service = setup_upload_service(tmp_path, monkeypatch)
     try:
         admin, admin_user = login(client, "admin"); supervisor, _ = login(client, "supervisor")
         item = upload(client, admin, admin_user["department"], effective_date="2026-01-01")
         assert item["extraction_status"] == "pending_ai"
         assert client.patch("/api/v1/knowledge/documents/law_test", headers=admin, json={"metadata_version": 1, "status": "effective"}).status_code == 409
         assert client.post("/api/v1/knowledge/documents/law_test/extract-metadata", headers=supervisor).status_code == 403
-        stored_path = root / "law_test" / "legal_knowledge.json"
-        stored_value = json.loads(stored_path.read_text(encoding="utf-8")); stored_value["metadata_extraction"]["status"] = "failed"
-        stored_path.write_text(json.dumps(stored_value), encoding="utf-8")
+        service.repository.update_document("law_test", lambda value: value["metadata_extraction"].update({"status": "failed"}))
         assert client.patch("/api/v1/knowledge/documents/law_test", headers=admin, json={"metadata_version": 1, "status": "effective"}).status_code == 409
         monkeypatch.setattr(knowledge_service_module, "load_review_settings", lambda _path: {"llm": {"api_url": "https://example.invalid/v1", "api_key": "key", "model": "model"}})
         monkeypatch.setattr(knowledge_service_module, "LLMService", FakeMetadataLLM)
@@ -129,7 +148,7 @@ def test_metadata_extraction_requires_admin_and_confirmation_propagates_units(tm
         assert extracted.json()["metadata_extraction"]["applicability"]["activities"][0]["evidence"][0]["legal_unit_id"] == "LAW-law_test-A0001-P01"
         confirmed = client.patch("/api/v1/knowledge/documents/law_test", headers=admin, json={"metadata_version": 2, "status": "effective"})
         assert confirmed.status_code == 200 and confirmed.json()["extraction_status"] == "confirmed"
-        stored = json.loads((root / "law_test" / "legal_knowledge.json").read_text(encoding="utf-8"))
+        stored = service.repository.get_document("law_test")
         assert stored["legal_document"]["applicability"]["activities"][0]["value"] == "采购活动"
         assert stored["units"][0]["status"] == "effective"
         assert stored["units"][0]["effective_date"] == "2026-01-01"

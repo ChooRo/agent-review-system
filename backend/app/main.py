@@ -14,7 +14,7 @@ from app.api.knowledge import router as knowledge_router
 from app.api.rules import router as rules_router
 from app.core.config import get_settings
 from app.review_engine.settings import load_settings
-from app.review_engine.services.runtime import configure_logging
+from app.review_engine.runner import configure_logging
 
 
 logger = logging.getLogger("review_api")

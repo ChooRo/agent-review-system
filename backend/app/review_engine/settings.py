@@ -16,9 +16,9 @@ DEFAULTS: dict[str, Any] = {
     },
     "ocr": {"api_url": "", "api_key": "", "model": "", "timeout_seconds": 120},
     "llm": {"api_url": "", "api_key": "", "model": "", "timeout_seconds": 120, "max_retries": 2},
-    "rules": {"path": None, "knowledge_root": "../../../knowledge/rules"},
+    "rules": {"path": None},
     "workflow": {
-        "extract_workers": 2,
+        "extract_workers": 6,
         "model_tokens": 28_000,
         "output_tokens": 5_000,
         "safety_tokens": 1_500,
@@ -82,7 +82,6 @@ def _apply_environment(settings: dict[str, Any]) -> None:
         "REVIEW_LLM_TIMEOUT_SECONDS": ("llm", "timeout_seconds"),
         "REVIEW_LLM_MAX_RETRIES": ("llm", "max_retries"),
         "REVIEW_RULES_PATH": ("rules", "path"),
-        "REVIEW_RULES_KNOWLEDGE_ROOT": ("rules", "knowledge_root"),
         "REVIEW_EXTRACT_WORKERS": ("workflow", "extract_workers"),
         "REVIEW_MODEL_TOKENS": ("workflow", "model_tokens"),
         "REVIEW_OUTPUT_TOKENS": ("workflow", "output_tokens"),
@@ -107,7 +106,7 @@ def _apply_environment(settings: dict[str, Any]) -> None:
 
 def _resolve_paths(settings: dict[str, Any], base: Path) -> None:
     """把规则库和运行目录解析为相对配置文件的绝对路径。"""
-    for group, key in (("rules", "path"), ("rules", "knowledge_root"), ("runtime", "runs_root")):
+    for group, key in (("rules", "path"), ("runtime", "runs_root")):
         raw = settings[group].get(key)
         if raw:
             path = Path(str(raw)).expanduser()
@@ -145,7 +144,7 @@ def _validate(settings: dict[str, Any]) -> None:
         raise ValueError("llm.max_retries 必须是非负整数")
     settings["llm"]["max_retries"] = retries
     try:
-        workers = int(settings["workflow"].get("extract_workers", 3))
+        workers = int(settings["workflow"].get("extract_workers", 6))
     except (TypeError, ValueError) as exc:
         raise ValueError("workflow.extract_workers 必须是1到8之间的整数") from exc
     if not 1 <= workers <= 8:

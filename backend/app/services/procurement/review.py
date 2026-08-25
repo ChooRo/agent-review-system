@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import shutil
 import uuid
 from difflib import SequenceMatcher
 from datetime import UTC, datetime
@@ -14,12 +13,12 @@ from app.core.auth_store import get_auth_store
 from app.core.config import get_settings
 from app.policies import common as common_policy
 from app.policies import review as review_policy
-from app.repositories.backend import get_review_repository
-import threading
+from app.repositories.postgres.review_repository import PostgresReviewRepository
+from app.integrations.storage.local import LocalStorage
 import json
 
-from app.services.procurement.workflow import run_review_workflow
 from app.review_engine.settings import load_settings
+from app.workers.review_tasks import enqueue_review
 
 STATES = {"draft", "rectification_draft", "queued", "parsing", "reviewing", "applicability_review", "operator_review", "primary_review", "primary_recheck", "completed", "final_locked", "failed", "cancelled"}
 ALLOWED_TYPES = {".pdf": {"application/pdf"}, ".doc": {"application/msword", "application/octet-stream"}, ".docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/zip", "application/octet-stream"}}
@@ -32,10 +31,11 @@ def fail(code: int, detail: str) -> None: raise HTTPException(code, detail)
 class ProcurementReviewService:
     def __init__(self) -> None:
         root = Path(get_settings().data_dir)
-        self.repository = get_review_repository(root)
+        self.repository = PostgresReviewRepository(root)
         self.projects, self.tasks, self.findings = (self.repository.collection("projects"), self.repository.collection("tasks"), self.repository.collection("findings"))
         self.events_store, self.comments, self.audit, self.keys = (self.repository.collection("events"), self.repository.collection("comments"), self.repository.collection("audit"), self.repository.collection("idempotency"))
         self.auth = get_auth_store()
+        self.storage = LocalStorage(get_settings().uploads_dir)
 
     def create_project(self, payload: dict[str, Any], user: dict, key: str | None) -> dict:
         self._role(user, "operator"); replay = self._replay(key)
@@ -72,7 +72,8 @@ class ProcurementReviewService:
         replay = self._replay(key)
         if replay: return replay
         tasks = self.tasks.read()
-        if any(x["project_id"] == project_id and x["status"] != "cancelled" for x in tasks["items"]): fail(409, "项目已有有效采购文件审查任务")
+        # 临时采购文件审查测试：允许同一项目创建多个有效审查任务。
+        # if any(x["project_id"] == project_id and x["status"] != "cancelled" for x in tasks["items"]): fail(409, "项目已有有效采购文件审查任务")
         primary = next((x for x in self.auth._read()["users"] if review_policy.can_be_primary_supervisor(x)), None)
         if not primary: fail(500, "未配置采购部门主责监督")
         collaborators = [x for x in self.auth._read()["users"] if x["id"] in payload["collaborative_supervisor_ids"] and review_policy.can_be_collaborative_supervisor(x) and x["id"] != primary["id"]]
@@ -96,12 +97,16 @@ class ProcurementReviewService:
         self._task_access(task, user)
         run_id = task.get("engine_run_id")
         if not run_id:
-            return {"task_id": task_id, "run_id": None, "status": task.get("status"), "llm_calls": [], "tool_calls": [], "events": [], "stage_results": []}
+            return self._debug_unavailable(task_id, None, task.get("status"), "ENGINE_RUN_ID_MISSING", "PostgreSQL task 尚未记录 engine_run_id，尚无可定位的运行目录。")
         config_path = Path(__file__).resolve().parents[3] / "review_config.json"
         config = load_settings(config_path if config_path.is_file() else None)
         run_dir = Path(config["runtime"]["runs_root"]) / run_id
         if not run_dir.is_dir():
-            return {"task_id": task_id, "run_id": run_id, "status": task.get("status"), "llm_calls": [], "tool_calls": [], "events": [], "stage_results": []}
+            return self._debug_unavailable(
+                task_id, run_id, task.get("status"), "RUN_DIRECTORY_UNAVAILABLE",
+                f"PostgreSQL 已记录 engine_run_id={run_id}，但共享运行目录不可见：{run_dir}。请确认 API 与 Celery 使用同一 REVIEW_RUNS_ROOT/挂载目录。",
+                run_dir,
+            )
         events = []
         events_path = run_dir / "events.jsonl"
         if events_path.is_file():
@@ -114,11 +119,25 @@ class ProcurementReviewService:
             llm_calls.append({"id": trace_path.stem, "step": step, "skill": skill, **trace})
         tool_calls = [event for event in events if event.get("event") == "tool_called"]
         stage_results = self._debug_stage_results(run_dir)
+        diagnosis = (
+            {"code": "RUN_DIRECTORY_AVAILABLE", "message": "已定位共享运行目录。"}
+            if stage_results else
+            {"code": "STAGE_ARTIFACTS_MISSING", "message": "已定位运行目录，但其中没有可读取的阶段产物 JSON；请检查 worker 是否加载了当前代码。"}
+        )
         return {
-            "task_id": task_id, "run_id": run_id, "status": task.get("status"),
+            "task_id": task_id, "run_id": run_id, "engine_run_id": run_id, "run_dir": str(run_dir), "status": task.get("status"),
+            "diagnosis": diagnosis,
             "state": self._read_debug_json(run_dir / "state.json"),
             "llm_calls": llm_calls, "tool_calls": tool_calls,
             "events": events, "stage_results": stage_results,
+        }
+
+    @staticmethod
+    def _debug_unavailable(task_id: str, run_id: str | None, status: str | None, code: str, message: str, run_dir: Path | None = None) -> dict[str, Any]:
+        return {
+            "task_id": task_id, "run_id": run_id, "engine_run_id": run_id, "run_dir": str(run_dir) if run_dir else None,
+            "status": status, "diagnosis": {"code": code, "message": message},
+            "llm_calls": [], "tool_calls": [], "events": [], "stage_results": [],
         }
 
     @staticmethod
@@ -265,15 +284,15 @@ class ProcurementReviewService:
         if task["status"] != "draft": fail(409, "当前状态不能上传文件")
         suffix = Path(file.filename or "").suffix.lower(); content_type = file.content_type or "application/octet-stream"
         if suffix not in ALLOWED_TYPES or content_type not in ALLOWED_TYPES[suffix]: fail(400, "文件扩展名或 MIME 类型不支持")
-        target = Path(get_settings().uploads_dir) / project_id / task_id / uid("doc") / (file.filename or "document")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("wb") as out: shutil.copyfileobj(file.file, out)
+        key = f"{project_id}/{task_id}/{uid('doc')}/{file.filename or 'document'}"
+        self.storage.upload(key, file.file)
+        target = self.storage.path(key)
         size = target.stat().st_size
-        if not size or size > get_settings().max_upload_bytes: target.unlink(); fail(413, "文件为空或超过大小限制")
+        if not size or size > get_settings().max_upload_bytes: self.storage.delete(key); fail(413, "文件为空或超过大小限制")
         head = target.read_bytes()[:8]
-        if (suffix == ".pdf" and not head.startswith(b"%PDF-")) or (suffix == ".docx" and not head.startswith(b"PK")) or (suffix == ".doc" and not head.startswith(b"\xd0\xcf\x11\xe0")): target.unlink(); fail(400, "文件头与扩展名不匹配")
+        if (suffix == ".pdf" and not head.startswith(b"%PDF-")) or (suffix == ".docx" and not head.startswith(b"PK")) or (suffix == ".doc" and not head.startswith(b"\xd0\xcf\x11\xe0")): self.storage.delete(key); fail(400, "文件头与扩展名不匹配")
         with target.open("rb") as stream: digest = hashlib.file_digest(stream, "sha256").hexdigest()
-        document = {"id": target.parent.name, "file_name": file.filename, "content_type": content_type, "size": size, "sha256": digest, "path": str(target), "version": 1, "uploaded_by": user["id"], "uploaded_at": now()}
+        document = {"id": target.parent.name, "file_name": file.filename, "content_type": content_type, "size": size, "sha256": digest, "path": key, "version": 1, "uploaded_by": user["id"], "uploaded_at": now()}
         task["document"] = document; task.setdefault("document_versions", []).append(document); task["version"] += 1; task["updated_at"] = now(); self.tasks.write(data); self._audit(user, "document_uploaded", task_id); return self._task_out(task, user)
 
     def upload_rectification(self, project_id: str, task_id: str, file: UploadFile, user: dict) -> dict:
@@ -284,14 +303,14 @@ class ProcurementReviewService:
         suffix = Path(file.filename or "").suffix.lower(); content_type = file.content_type or "application/octet-stream"
         if suffix not in ALLOWED_TYPES or content_type not in ALLOWED_TYPES[suffix]: fail(400, "文件扩展名或 MIME 类型不支持")
         version = len(task.get("document_versions") or ([task["document"]] if task.get("document") else [])) + 1
-        target = Path(get_settings().uploads_dir) / project_id / task_id / uid("doc") / (file.filename or "document")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("wb") as out: shutil.copyfileobj(file.file, out)
+        key = f"{project_id}/{task_id}/{uid('doc')}/{file.filename or 'document'}"
+        self.storage.upload(key, file.file)
+        target = self.storage.path(key)
         size = target.stat().st_size; head = target.read_bytes()[:8]
-        if not size or size > get_settings().max_upload_bytes: target.unlink(); fail(413, "文件为空或超过大小限制")
-        if (suffix == ".pdf" and not head.startswith(b"%PDF-")) or (suffix == ".docx" and not head.startswith(b"PK")) or (suffix == ".doc" and not head.startswith(b"\xd0\xcf\x11\xe0")): target.unlink(); fail(400, "文件头与扩展名不匹配")
+        if not size or size > get_settings().max_upload_bytes: self.storage.delete(key); fail(413, "文件为空或超过大小限制")
+        if (suffix == ".pdf" and not head.startswith(b"%PDF-")) or (suffix == ".docx" and not head.startswith(b"PK")) or (suffix == ".doc" and not head.startswith(b"\xd0\xcf\x11\xe0")): self.storage.delete(key); fail(400, "文件头与扩展名不匹配")
         with target.open("rb") as stream: digest = hashlib.file_digest(stream, "sha256").hexdigest()
-        document = {"id": target.parent.name, "file_name": file.filename, "content_type": content_type, "size": size, "sha256": digest, "path": str(target), "version": version, "uploaded_by": user["id"], "uploaded_at": now()}
+        document = {"id": target.parent.name, "file_name": file.filename, "content_type": content_type, "size": size, "sha256": digest, "path": key, "version": version, "uploaded_by": user["id"], "uploaded_at": now()}
         task.setdefault("document_versions", [task["document"]] if task.get("document") else []).append(document)
         task["document"] = document; before = task["status"]; task["status"] = "rectification_draft"; task["engine_run_id"] = None; task["progress"] = 0; task["version"] += 1; task["updated_at"] = now()
         self.tasks.write(data); self._event(task, user, before, "rectification_draft", "已上传采购文件整改版"); self._audit(user, "rectification_uploaded", task_id, {"document_version": version, "sha256": digest}); return self._task_out(task, user)
@@ -301,39 +320,24 @@ class ProcurementReviewService:
         if replay: return replay
         if not task["document"]: fail(400, "请先上传采购文件")
         if task["status"] not in {"draft", "rectification_draft", "failed"}: fail(409, "任务已启动")
-        previous_run_id = task.get("engine_run_id")
         task.pop("error", None)
+        task.pop("progress_step", None)
+        task.pop("batch_completed", None)
+        task.pop("batch_total", None)
         for state in ("queued", "parsing", "reviewing"):
             self._transition(task, user, state, "启动审查")
         task["progress"] = 5; task["updated_at"] = now(); task["version"] += 1
         self.tasks.write(data)
-        outcome = self._remember(key, self._task_out(task, user))
-        project, _ = self._project_row(project_id)
-        task_context = {"project": {"name": project.get("name"), "project_code": project.get("project_code")}, "title": task.get("title")}
-        thread = threading.Thread(
-            target=self._run_review_workflow_with_heartbeat,
-            args=(project_id, task_id, task["document"]["path"], previous_run_id, task_context),
-            daemon=True,
-        )
-        thread.start()
-        return outcome
+        self._enqueue_review(project_id, task_id)
+        return self._remember(key, self._task_out(task, user))
 
-    def _run_review_workflow_with_heartbeat(self, project_id: str, task_id: str, doc_path: str, engine_run_id: str | None, task_context: dict) -> None:
-        """工作进程执行耗时的解析器或 LLM 调用时，持续写入可靠的心跳。"""
-        stopped = threading.Event()
-
-        def heartbeat() -> None:
-            while not stopped.wait(30):
-                self._touch_review_task(project_id, task_id)
-
-        monitor = threading.Thread(target=heartbeat, daemon=True)
-        monitor.start()
+    def _enqueue_review(self, project_id: str, task_id: str) -> None:
         try:
-            confirmations = self.tasks.read()["items"]
-            task = next((item for item in confirmations if item["id"] == task_id), {})
-            run_review_workflow(project_id, task_id, doc_path, self._store_review_results, self._fail_review_task, self._update_review_progress, engine_run_id, task_context, self._pause_for_legal_applicability, task.get("legal_applicability_confirmations"))
-        finally:
-            stopped.set()
+            enqueue_review(project_id, task_id, uid("run"))
+        except Exception as exc:
+            error = f"审查任务发布失败：{str(exc)[:500]}"
+            self._fail_review_task(project_id, task_id, error)
+            fail(503, f"{error}，请重试")
 
     def _pause_for_legal_applicability(self, project_id: str, task_id: str, gate: dict) -> None:
         def persist(state: dict) -> None:
@@ -345,13 +349,6 @@ class ProcurementReviewService:
             task["legal_context_freeze"] = gate.get("candidate_frozen_context", gate.get("frozen_context", [])); task["legal_applicability_confirmations"] = {}
             task["updated_at"] = now(); task["version"] += 1
             state["events"].append({"id": uid("evt"), "task_id": task_id, "actor_id": 0, "at": now(), "before_status": before, "after_status": "applicability_review", "reason": "适用法规匹配完成，等待审查前人工确认"})
-        self.repository.transaction(persist)
-
-    def _touch_review_task(self, project_id: str, task_id: str) -> None:
-        def persist(state: dict) -> None:
-            task = next((t for t in state["tasks"] if t["id"] == task_id and t["project_id"] == project_id), None)
-            if task and task.get("status") in {"queued", "parsing", "reviewing"}:
-                task["updated_at"] = now()
         self.repository.transaction(persist)
 
     def _expire_stalled_tasks(self) -> None:
@@ -499,9 +496,7 @@ class ProcurementReviewService:
         if required and all(key in confirmations for key in required) and not any(confirmations[key]["decision"] == "needs_more_facts" for key in required):
             before = task["status"]; task["status"] = "reviewing"; task["updated_at"] = now(); task["version"] += 1; self.tasks.write(data)
             self._event(task, user, before, "reviewing", "审查前法规适用性确认完成，恢复专业审查")
-            project, _ = self._project_row(project_id)
-            context = {"project": {"name": project.get("name"), "project_code": project.get("project_code")}, "title": task.get("title")}
-            threading.Thread(target=self._run_review_workflow_with_heartbeat, args=(project_id, task_id, task["document"]["path"], task.get("engine_run_id"), context), daemon=True).start()
+            self._enqueue_review(project_id, task_id)
         return self._task_out(task, user)
     def operator_disposition(self, project_id: str, task_id: str, finding_id: str, payload: dict, user: dict) -> dict:
         task, _ = self._task(project_id, task_id); self._operator(task, user); self._writable(task)

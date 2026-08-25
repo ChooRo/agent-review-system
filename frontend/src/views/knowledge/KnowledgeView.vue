@@ -511,7 +511,7 @@ onMounted(() => { void loadDocuments() })
       <p v-else class="upload-pending">解析和 AI 提取可能需要一些时间，提交后进度与错误均在文档列表原地显示。</p>
       <p v-if="uploadTask?.status === 'failed'" class="upload-error">解析失败：{{ uploadTask.error || '未知错误' }}</p>
       <p v-if="uploadError" class="upload-error">{{ uploadError }}</p>
-      <div class="modal-foot"><button class="btn" type="button" :disabled="uploading" @click="showUpload = false">取消</button><button v-if="uploadTask?.status === 'failed'" class="btn pri" type="button" :disabled="uploading" @click="retryUpload">{{ uploading ? '正在重试…' : '手动重试' }}</button><button v-else class="btn pri" :disabled="uploading">{{ uploading ? '正在解析入库…' : '提交并自动提取' }}</button></div>
+       <div class="modal-foot"><button class="btn" type="button" :disabled="uploading" @click="showUpload = false">取消</button><button v-if="uploadTask?.status === 'failed'" class="btn pri" type="button" :disabled="uploading" @click="retryUpload">{{ uploading ? '正在重试…' : '手动重试' }}</button><button v-else class="btn pri" :disabled="uploading || !!uploadTask">{{ uploading ? '正在解析入库…' : '提交并自动提取' }}</button></div>
     </form>
   </BaseModal>
 

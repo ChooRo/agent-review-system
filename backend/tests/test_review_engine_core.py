@@ -1,14 +1,14 @@
 """权威后端审查引擎的迁移后核心检查。"""
 
-from app.review_engine.services.legal.knowledge import build_legal_knowledge
-from app.review_engine.services.procurement.ledger import LedgerService
-from app.review_engine.services.legal.retrieval import rank_legal_units
-from app.review_engine.services.procurement.structure import structure_review_batches
-from app.review_engine.services.topics import canonical_topic
+from app.review_engine.legal.knowledge import build_legal_knowledge
+from app.review_engine.procurement.ledger import LedgerService
+from app.review_engine.legal.retrieval import rank_legal_units
+from app.review_engine.procurement.structure import structure_review_batches
+from app.review_engine.common.topics import canonical_topic
 from app.review_engine.tools import ToolContext, build_registry
 from app.review_engine.tools.legal.rules import search_legal_units
 from app.review_engine.tools.legal.rules import search_rules
-from app.review_engine.services.mineru import MinerUService, adapt_content_list
+from app.integrations.mineru import MinerUService, adapt_content_list
 from pathlib import Path
 
 

@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / "backend"
 sys.path.insert(0, str(BACKEND))
 
-from app.review_engine.services.topics import dictionary_topics  # noqa: E402
+from app.review_engine.common.topics import dictionary_topics  # noqa: E402
 
 
 def migrate(path: Path, backup_root: Path, dry_run: bool = False) -> tuple[int, int]:

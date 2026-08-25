@@ -15,13 +15,15 @@ from typing import Any
 
 import httpx
 
+from .docx import Docx2PythonService
+
 
 class MinerUService:
     """解析原始业务文件，也接受MinerU content_list或统一Document JSON作为调试输入。"""
 
     def __init__(
         self,
-        api_url: str = "http://127.0.0.1:8000",
+        api_url: str = "http://127.0.0.1:8001",
         timeout_seconds: int = 900,
         ocr_config: dict[str, Any] | None = None,
         backend: str = "pipeline",
@@ -32,6 +34,7 @@ class MinerUService:
         self.ocr_config = ocr_config or {}
         self.backend = backend
         self.effort = effort
+        self.docx = Docx2PythonService()
 
     def parse(
         self,
@@ -47,6 +50,11 @@ class MinerUService:
         """将文件转换为统一Document JSON；JSON输入用于跳过耗时解析的调试。"""
         source = source.resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
+        if source.suffix.lower() == ".docx":
+            document = self.docx.parse(source, output_dir / "docx", role)
+            document["document_role"] = role
+            document["source_file"] = str(source)
+            return document
         if source.suffix.lower() == ".json":
             raw = json.loads(source.read_text(encoding="utf-8"))
             if isinstance(raw, dict) and isinstance(raw.get("blocks"), list):

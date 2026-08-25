@@ -8,7 +8,7 @@ from app.review_engine.settings import load_settings
 def test_review_config_paths_resolve_inside_project() -> None:
     backend = Path(__file__).resolve().parents[1]
     settings = load_settings(backend / "review_config.json")
-    assert Path(settings["rules"]["knowledge_root"]) == backend.parent / "knowledge" / "rules"
+    assert "knowledge_root" not in settings["rules"]
     assert Path(settings["runtime"]["runs_root"]) == backend.parent / "runs"
     assert settings["mineru"]["api_url"] == "http://127.0.0.1:8001"
 

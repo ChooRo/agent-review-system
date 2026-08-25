@@ -1,4 +1,4 @@
-from app.review_engine.services.legal.metadata import (
+from app.review_engine.legal.metadata import (
     candidate_batches,
     extract_applicability,
     load_skill_instructions,
@@ -66,7 +66,7 @@ def test_applicability_summary_is_two_to_three_lines_when_evidence_is_complete()
         "exclusions": [{"value": "法律另有规定的除外", "evidence": evidence}],
         "precedence_rules": [],
     }
-    from app.review_engine.services.legal.metadata import summarize_applicability
+    from app.review_engine.legal.metadata import summarize_applicability
 
     summary = summarize_applicability(applicability)
     assert 80 <= len(summary) <= 160
@@ -91,7 +91,7 @@ def test_selection_includes_context_before_referential_scope_clause() -> None:
 
 
 def test_applicability_summary_never_cuts_a_sentence_midway() -> None:
-    from app.review_engine.services.legal.metadata import summarize_applicability
+    from app.review_engine.legal.metadata import summarize_applicability
 
     long_boundary = "涉及国家安全、国家秘密、抢险救灾或者属于利用扶贫资金实行以工代赈、需要使用农民工等特殊情况，不适宜进行招标的项目"
     applicability = {

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -18,8 +19,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.core.config import get_settings
-from app.repositories.backend import get_review_repository
-from app.repositories.json_store import JsonStore
+from app.repositories.postgres.review_repository import PostgresReviewRepository
 
 
 RUNNING_STATUSES = {"queued", "parsing", "reviewing"}
@@ -109,16 +109,12 @@ def running_tasks(plan: DeletionPlan) -> list[str]:
     return [row["id"] for row in plan.state["tasks"] if row.get("id") in plan.task_ids and row.get("status") in RUNNING_STATUSES]
 
 
-def backup_and_delete(repository: ReviewRepository, data_dir: Path, plan: DeletionPlan) -> Path:
-    review_file = data_dir / "review_data.json"
+def backup_and_delete(repository: PostgresReviewRepository, data_dir: Path, plan: DeletionPlan) -> Path:
     backup_dir = data_dir / "backups" / f"delete_projects_{datetime.now(UTC):%Y%m%dT%H%M%SZ}_{uuid4().hex[:8]}"
     moved: list[tuple[Path, Path]] = []
-    with JsonStore._lock:
-        try:
-            backup_dir.mkdir(parents=True)
-            shutil.copy2(review_file, backup_dir / "review_data.json")
-        except OSError as exc:
-            raise CleanupError(f"backup failed; JSON was not modified: {exc}") from exc
+    try:
+        backup_dir.mkdir(parents=True)
+        (backup_dir / "review_state.json").write_text(json.dumps(plan.state, ensure_ascii=False, indent=2), encoding="utf-8")
         try:
             for source in plan.upload_dirs:
                 destination = backup_dir / "uploads" / source.name
@@ -134,7 +130,9 @@ def backup_and_delete(repository: ReviewRepository, data_dir: Path, plan: Deleti
                 for source, destination in reversed(moved):
                     if destination.exists():
                         shutil.move(str(destination), str(source))
-            raise CleanupError(f"delete failed; restored JSON/uploads from {backup_dir}: {exc}") from exc
+            raise CleanupError(f"delete failed; restored state/uploads from {backup_dir}: {exc}") from exc
+    except OSError as exc:
+        raise CleanupError(f"backup failed; state was not modified: {exc}") from exc
     return backup_dir
 
 
@@ -147,7 +145,7 @@ def configured_paths() -> tuple[Path, Path]:
     return (data_dir if data_dir.is_absolute() else BACKEND_ROOT / data_dir, uploads_dir if uploads_dir.is_absolute() else BACKEND_ROOT / uploads_dir)
 
 
-def list_projects(repository: ReviewRepository) -> None:
+def list_projects(repository: PostgresReviewRepository) -> None:
     state = repository.load()
     task_counts = {project["id"]: 0 for project in state["projects"]}
     for task in state["tasks"]:
@@ -167,11 +165,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.list:
         if args.project_id:
             parser.error("--list cannot be combined with --project-id")
-        data_dir, _ = configured_paths(); list_projects(get_review_repository(data_dir)); return 0
+        data_dir, _ = configured_paths(); list_projects(PostgresReviewRepository(data_dir)); return 0
     if not args.project_id:
         parser.error("provide --list or at least one exact --project-id")
     data_dir, uploads_dir = configured_paths()
-    repository = get_review_repository(data_dir)
+    repository = PostgresReviewRepository(data_dir)
     try:
         plan = make_plan(repository.load(), set(args.project_id), uploads_dir)
         active = running_tasks(plan)

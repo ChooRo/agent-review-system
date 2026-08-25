@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -16,8 +17,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from app.core.config import get_settings
-from app.repositories.backend import get_review_repository
-from app.repositories.json_store import JsonStore
+from app.repositories.postgres.review_repository import PostgresReviewRepository
 from scripts.delete_projects import CleanupError, contains_id, validate_deleted
 
 RUNNING_STATUSES = {"queued", "parsing", "reviewing"}
@@ -58,21 +58,19 @@ def print_plan(plan: dict, dry_run: bool) -> None:
         print(f"{name}:", len(plan["state"][name]) - len(plan["cleaned"][name]))
 
 
-def delete(repository: ReviewRepository, data_dir: Path, plan: dict) -> Path:
-    review_file = data_dir / "review_data.json"
+def delete(repository: PostgresReviewRepository, data_dir: Path, plan: dict) -> Path:
     backup_dir = data_dir / "backups" / f"delete_tasks_{datetime.now(UTC):%Y%m%dT%H%M%SZ}_{uuid4().hex[:8]}"
-    with JsonStore._lock:
-        backup_dir.mkdir(parents=True)
-        shutil.copy2(review_file, backup_dir / "review_data.json")
-        try:
-            repository.commit(plan["cleaned"])
-            validate_deleted(repository.load(), type("Plan", (), {
-                "project_ids": set(), "task_ids": plan["task_ids"], "finding_ids": plan["finding_ids"],
-                "comment_ids": set(), "event_ids": set(),
-            })())
-        except Exception as exc:
-            repository.commit(plan["state"])
-            raise CleanupError(f"delete failed; JSON restored from {backup_dir}: {exc}") from exc
+    backup_dir.mkdir(parents=True)
+    (backup_dir / "review_state.json").write_text(json.dumps(plan["state"], ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        repository.commit(plan["cleaned"])
+        validate_deleted(repository.load(), type("Plan", (), {
+            "project_ids": set(), "task_ids": plan["task_ids"], "finding_ids": plan["finding_ids"],
+            "comment_ids": set(), "event_ids": set(),
+        })())
+    except Exception as exc:
+        repository.commit(plan["state"])
+        raise CleanupError(f"delete failed; state backed up at {backup_dir}: {exc}") from exc
     return backup_dir
 
 
@@ -84,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--force", action="store_true", help="Allow deletion of running tasks.")
     args = parser.parse_args(argv)
     data_dir = configured_data_dir()
-    repository = get_review_repository(data_dir)
+    repository = PostgresReviewRepository(data_dir)
     if args.list:
         if args.task_id:
             parser.error("--list cannot be combined with --task-id")

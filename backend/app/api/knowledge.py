@@ -16,6 +16,7 @@ Service = Annotated[KnowledgeService, Depends(KnowledgeService)]
 
 @router.get("")
 def list_knowledge(user: CurrentUser, service: Service, keyword: str | None = Query(default=None), status: str | None = Query(default=None)):
+    """查询法律知识库文档，并按用户权限过滤结果。"""
     return service.list_documents(keyword, status, user)
 
 
@@ -32,11 +33,13 @@ def upload_knowledge_document(
     effective_date: str | None = Form(default=None),
     expiry_date: str | None = Form(default=None),
 ):
+    """上传法律文档并创建异步解析任务。"""
     return service.upload(file, {"title": title, "issuer": issuer, "department": department, "document_version": document_version, "applicable_scope": applicable_scope, "effective_date": effective_date, "expiry_date": expiry_date}, user)
 
 
 @router.get("/documents/tasks/{task_id}")
 def get_knowledge_upload_task(task_id: str, user: CurrentUser, service: Service):
+    """查询法律文档上传和解析任务的当前状态。"""
     if not knowledge_policy.can_maintain_knowledge(user):
         raise HTTPException(403, "only administrators can view legal upload tasks")
     task = service.task(task_id)
@@ -47,6 +50,7 @@ def get_knowledge_upload_task(task_id: str, user: CurrentUser, service: Service)
 
 @router.post("/documents/tasks/{task_id}/retry")
 def retry_knowledge_upload_task(task_id: str, user: CurrentUser, service: Service):
+    """重新执行失败的法律文档上传任务。"""
     if not knowledge_policy.can_maintain_knowledge(user):
         raise HTTPException(403, "only administrators can retry legal upload tasks")
     task = service.retry_task(task_id)
@@ -57,6 +61,7 @@ def retry_knowledge_upload_task(task_id: str, user: CurrentUser, service: Servic
 
 @router.patch("/documents/{document_key}", response_model=KnowledgeDocumentOut)
 def update_knowledge_document(document_key: str, payload: KnowledgeDocumentUpdate, user: CurrentUser, service: Service):
+    """更新法律知识文档的元数据。"""
     return service.update(document_key, payload.model_dump(exclude_unset=True), user)
 
 
@@ -68,9 +73,11 @@ def extract_knowledge_metadata(document_key: str, user: CurrentUser, service: Se
 
 @router.get("/rules", response_model=list[RuleOut])
 def list_rules(user: CurrentUser, service: Service, keyword: str | None = Query(default=None)):
+    """查询当前用户可见的法律适用规则。"""
     return service.rules(keyword, user)
 
 
 @router.get("/{document_key}")
 def get_knowledge(document_key: str, user: CurrentUser, service: Service):
+    """获取单个法律知识文档的详细信息。"""
     return service.detail(document_key, user)

@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
 def now_iso() -> str:
@@ -138,3 +139,127 @@ class RunStore:
         if not self.events_path.exists():
             return []
         return [json.loads(line) for line in self.events_path.read_text(encoding="utf-8").splitlines() if line]
+
+
+class CheckpointRunner:
+    """通用检查点执行器；不包含任何采购或其他业务步骤。"""
+
+    STEPS: tuple[str, ...] = ()
+
+    def __init__(
+        self,
+        runs_root: Path,
+        config: dict[str, Any] | None = None,
+        progress_callback: Callable[[RunStore, dict[str, Any], str | None], None] | None = None,
+    ) -> None:
+        self.runs_root = runs_root.resolve()
+        self.config = config or {}
+        self.progress_callback = progress_callback
+
+    def start(
+        self,
+        scenario: str,
+        documents: dict[str, str],
+        pause_after: str | None = None,
+        task_context: dict[str, Any] | None = None,
+    ) -> RunStore:
+        self.validate_request(scenario, documents, pause_after)
+        store = RunStore.create(self.runs_root, scenario, documents, pause_after, task_context)
+        return self.run(store)
+
+    def validate_request(
+        self, scenario: str, documents: dict[str, str], pause_after: str | None
+    ) -> None:
+        """业务工作流可覆盖的输入校验钩子。"""
+
+    def resume(self, run_dir: Path, pause_after: str | None = None) -> RunStore:
+        store = RunStore(run_dir)
+        state = store.load_state()
+        if state["status"] == "completed":
+            return store
+        if pause_after is not None:
+            if pause_after not in self.STEPS:
+                raise ValueError(f"未知断点：{pause_after}")
+            state["pause_after"] = pause_after
+            store.save_state(state)
+        store.event("INFO", "run", "resumed", "从检查点恢复运行")
+        return self.run(store)
+
+    def runtime_services(self, store: RunStore) -> tuple[Any, Any]:
+        """返回步骤需要的外部服务；业务工作流负责决定具体实现。"""
+        return None, None
+
+    def run(self, store: RunStore) -> RunStore:
+        state = store.load_state()
+        llm, mineru = self.runtime_services(store)
+        handlers = {name: getattr(self, f"_{name}") for name in self.STEPS}
+        state["status"] = "running"
+        state["error"] = None
+        store.save_state(state)
+        if self.progress_callback:
+            self.progress_callback(store, state, None)
+        for index, step in enumerate(self.STEPS, start=1):
+            state = store.load_state()
+            if step in state["completed_steps"]:
+                continue
+            state["current_step"] = step
+            store.save_state(state)
+            started = time.perf_counter()
+            store.event("INFO", step, "started", "步骤开始")
+            try:
+                output = handlers[step](store, state, llm, mineru)
+                artifact = store.write_artifact(index, step, output)
+                state = store.load_state()
+                state["completed_steps"].append(step)
+                state["current_step"] = None
+                state["error"] = None
+                duration = round(time.perf_counter() - started, 3)
+                store.save_state(state)
+                if self.progress_callback:
+                    self.progress_callback(store, state, step)
+                store.event(
+                    "INFO", step, "completed", "步骤完成",
+                    duration_seconds=duration, artifact=str(artifact), summary=summarize(output),
+                )
+                if state.get("pause_after") == step:
+                    state["status"] = "paused"
+                    store.save_state(state)
+                    store.event("INFO", step, "paused", "命中断点，等待恢复")
+                    return store
+            except Exception as exc:
+                state = store.load_state()
+                state["status"] = "failed"
+                state["error"] = {"step": step, "type": type(exc).__name__, "message": str(exc)}
+                store.save_state(state)
+                store.event("ERROR", step, "failed", str(exc), error_type=type(exc).__name__)
+                logging.getLogger("review_mvp").exception("步骤失败：%s", step)
+                return store
+        state = store.load_state()
+        state["status"] = "completed"
+        state["current_step"] = None
+        store.save_state(state)
+        store.event("INFO", "run", "completed", "全部步骤完成")
+        return store
+
+    def _previous(self, store: RunStore, step: str) -> Any:
+        return store.read_artifact(self.STEPS.index(step) + 1, step)
+
+
+Runner = CheckpointRunner
+
+
+def summarize(value: Any) -> dict[str, Any]:
+    """生成日志摘要，避免把步骤全文写入运行事件。"""
+    if not isinstance(value, dict):
+        return {"type": type(value).__name__}
+    summary: dict[str, Any] = {"keys": list(value)[:12]}
+    for key in ("documents", "profiles", "candidates", "ledgers", "quality"):
+        if isinstance(value.get(key), dict):
+            summary[f"{key}_counts"] = {
+                name: len(item) if isinstance(item, (list, dict)) else 1
+                for name, item in value[key].items()
+            }
+    for key in ("finding_count", "verified_count", "insufficient_count"):
+        if key in value:
+            summary[key] = value[key]
+    return summary

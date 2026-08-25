@@ -25,7 +25,7 @@ SKILL_NAME = "extract-legal-applicability-profile"
 
 @lru_cache(maxsize=1)
 def load_skill_instructions() -> str:
-    skill_path = Path(__file__).resolve().parents[2] / "skills" / SKILL_NAME / "SKILL.md"
+    skill_path = Path(__file__).resolve().parents[1] / "skills" / SKILL_NAME / "SKILL.md"
     if not skill_path.is_file():
         raise FileNotFoundError(f"legal applicability Skill not found: {skill_path}")
     return skill_path.read_text(encoding="utf-8")

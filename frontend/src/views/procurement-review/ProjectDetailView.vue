@@ -23,6 +23,7 @@ const error = ref('')
 const retryingTaskIds = ref(new Set<string>())
 const taskErrors = ref<Record<string, string>>({})
 const rectifyingTaskIds = ref(new Set<string>())
+const retryPermissionMessage = '仅任务原经办人可重新处理，请切换到经办人账号。'
 let progressTimer: number | undefined
 let refreshInFlight = false
 
@@ -113,6 +114,10 @@ async function submit() {
 function isRetrying(taskId: string) { return retryingTaskIds.value.has(taskId) }
 
 async function retryFailedTask(task: ReviewTask) {
+  if (task.task_role !== 'operator') {
+    taskErrors.value = { ...taskErrors.value, [task.id]: retryPermissionMessage }
+    return
+  }
   if (isRetrying(task.id)) return
   retryingTaskIds.value = new Set(retryingTaskIds.value).add(task.id)
   const nextErrors = { ...taskErrors.value }
@@ -233,11 +238,11 @@ onUnmounted(stopProgressPolling)
             </div>
             <div class="subtask-result">{{ task.updated_at?.slice(0, 10) ?? task.created_at?.slice(0, 10) ?? '—' }}</div>
             <div class="task-row-actions">
-              <button class="btn" @click="router.push({ name: 'task-debug', params: { projectId: projectId, taskId: task.id } })">调试</button>
               <button
                 class="btn"
                 :class="{ pri: task.status !== 'completed' && !isActiveTask(task) }"
                 :disabled="isActiveTask(task) || isRetrying(task.id)"
+                :title="task.status === 'failed' && task.task_role !== 'operator' ? retryPermissionMessage : undefined"
                 @click="task.status === 'failed' ? retryFailedTask(task) : taskAction(task)"
               >
                 <template v-if="isActiveTask(task)">{{ statusLabel[task.status] || '处理中' }}</template>

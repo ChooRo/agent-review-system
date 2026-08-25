@@ -8,8 +8,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from ..mineru import MinerUService
-from ..runtime import read_json, write_json
+from app.integrations.mineru import MinerUService
+from ..runner import read_json, write_json
 from .batching import table_rows, table_structure_status
 
 

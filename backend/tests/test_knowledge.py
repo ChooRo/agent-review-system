@@ -1,6 +1,19 @@
+from pathlib import Path
+
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.repositories.postgres.knowledge_repository import PostgresKnowledgeRepository
+
+
+@pytest.fixture(autouse=True)
+def seed_legal_knowledge() -> None:
+    """API 测试显式回填法规资产，不让运行时回退读取历史 JSON。"""
+    from scripts.backfill_postgres import backfill_legal_knowledge
+
+    root = Path(__file__).resolve().parents[2] / "knowledge" / "rules"
+    backfill_legal_knowledge(root, PostgresKnowledgeRepository())
 
 
 def test_knowledge_api_requires_login_and_is_readable_by_operator() -> None:

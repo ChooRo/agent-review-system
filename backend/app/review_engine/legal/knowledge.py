@@ -6,15 +6,12 @@ import hashlib
 import re
 from pathlib import Path
 from typing import Any
-from xml.etree import ElementTree as ET
-from zipfile import ZipFile
 
-from ..mineru import MinerUService, namespace_block_ids
-from ..runtime import write_json
-from ..topics import dictionary_topics
+from app.integrations.mineru import MinerUService
+from ..runner import write_json
+from ..common.topics import dictionary_topics
 
 
-W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 CHAPTER_RE = re.compile(r"^第\s*([〇零一二三四五六七八九十百千两\d]+)\s*章\s*(.*)$")
 SECTION_RE = re.compile(r"^第\s*([〇零一二三四五六七八九十百千两\d]+)\s*节\s*(.*)$")
 ARTICLE_RE = re.compile(r"^第\s*([〇零一二三四五六七八九十百千两\d]+)\s*条[　\s]*(.*)$")
@@ -32,67 +29,11 @@ def ingest_legal_document(
     source = source.resolve()
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        document = mineru.parse(source, output_dir / "parser", "legal")
-    except Exception as exc:
-        if source.suffix.lower() != ".docx":
-            raise
-        document = parse_docx(source)
-        document["parser"].update({
-            "fallback_from": "mineru",
-            "fallback_reason": f"{type(exc).__name__}: {exc}",
-        })
+    document = mineru.parse(source, output_dir / "parser", "legal")
     knowledge = build_legal_knowledge(document, metadata or {})
     write_json(output_dir / "document.json", document)
     write_json(output_dir / "legal_knowledge.json", knowledge)
     return knowledge
-
-
-def parse_docx(source: Path) -> dict[str, Any]:
-    """直接读取DOCX段落与表格，输出和MinerU兼容的Block结构。"""
-    namespace = {"w": W_NS}
-    with ZipFile(source) as archive:
-        root = ET.fromstring(archive.read("word/document.xml"))
-    body = root.find("w:body", namespace)
-    if body is None:
-        raise ValueError("DOCX中没有正文")
-    blocks: list[dict[str, Any]] = []
-    for element in body:
-        kind = element.tag.rsplit("}", 1)[-1]
-        if kind == "p":
-            text = "".join(node.text or "" for node in element.findall(".//w:t", namespace)).strip()
-            block_type = "paragraph"
-        elif kind == "tbl":
-            rows = []
-            for row in element.findall(".//w:tr", namespace):
-                cells = ["".join(node.text or "" for node in cell.findall(".//w:t", namespace)).strip() for cell in row.findall("w:tc", namespace)]
-                rows.append(" | ".join(cells))
-            text = "\n".join(row for row in rows if row.strip(" |"))
-            block_type = "table"
-        else:
-            continue
-        if not text:
-            continue
-        index = len(blocks) + 1
-        blocks.append({
-            "block_id": f"B-{index:05d}",
-            "block_type": block_type,
-            "heading_path": [],
-            "text": text,
-            "page_no": None,
-            "bbox": None,
-            "reading_order": index,
-            "source": {"docx_element": kind},
-        })
-    document = {
-        "document_id": source.stem,
-        "document_role": "legal",
-        "source_file": str(source),
-        "parser": {"name": "docx-direct", "source": "word/document.xml"},
-        "blocks": blocks,
-    }
-    namespace_block_ids(document, "legal")
-    return document
 
 
 def build_legal_knowledge(document: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..topics import canonical_topic, dictionary_topics, topic_keys
+from ..common.topics import canonical_topic, dictionary_topics, topic_keys
 
 
 def normalize_text(value: Any) -> str:

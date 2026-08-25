@@ -3,7 +3,7 @@
 from typing import Any
 
 from ..schemas import ToolContext
-from ...services.legal.retrieval import retrieve_legal_units
+from ...legal.retrieval import retrieve_legal_units
 
 
 def search_rules(

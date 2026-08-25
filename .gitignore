@@ -19,3 +19,8 @@ vite.config.d.ts
 backend/tests/*.db
 backend/.uv-cache/
 backend/data/*.tmp
+backend/data/uploads/
+backend/data/knowledge_ingest/
+backend/data/knowledge_metadata/
+tmp/
+智能招采/

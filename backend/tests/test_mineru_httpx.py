@@ -4,7 +4,7 @@ from zipfile import ZipFile
 
 import httpx
 
-from app.review_engine.services.mineru import MinerUService
+from app.integrations.mineru import MinerUService
 
 
 def test_mineru_client_does_not_inherit_environment_proxies(monkeypatch, tmp_path: Path) -> None:
@@ -31,7 +31,7 @@ def test_mineru_client_does_not_inherit_environment_proxies(monkeypatch, tmp_pat
                 request=httpx.Request("POST", "http://[::1]:8000/file_parse"),
             )
 
-    monkeypatch.setattr("app.review_engine.services.mineru.httpx.Client", FakeClient)
+    monkeypatch.setattr("app.integrations.mineru.httpx.Client", FakeClient)
     source = tmp_path / "input.pdf"
     source.write_bytes(b"%PDF-1.4")
 
@@ -67,7 +67,7 @@ def test_deepseek_ocr_supplements_empty_image_blocks(monkeypatch, tmp_path: Path
                 request=httpx.Request("POST", "http://127.0.0.1:8002/v1/chat/completions"),
             )
 
-    monkeypatch.setattr("app.review_engine.services.mineru.httpx.Client", FakeClient)
+    monkeypatch.setattr("app.integrations.mineru.httpx.Client", FakeClient)
     image = tmp_path / "page.png"
     image.write_bytes(b"png")
     document = {"blocks": [{"block_type": "image", "text": "", "source": {"image_ref": str(image)}}]}
@@ -94,7 +94,7 @@ def test_deepseek_ocr_retries_server_error_and_records_final_http_detail(monkeyp
                 request=httpx.Request("POST", "http://127.0.0.1:8002/v1/chat/completions"),
             )
 
-    monkeypatch.setattr("app.review_engine.services.mineru.httpx.Client", FakeClient)
+    monkeypatch.setattr("app.integrations.mineru.httpx.Client", FakeClient)
     image = tmp_path / "page.png"
     image.write_bytes(b"png")
     document = {"blocks": [{"block_type": "image", "text": "", "source": {"image_ref": str(image)}}]}

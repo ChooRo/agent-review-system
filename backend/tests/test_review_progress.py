@@ -1,7 +1,8 @@
 from types import SimpleNamespace
 
 from app.core.config import get_settings
-from app.services.procurement import workflow as procurement_workflow
+from app.services.procurement import procurement_workflow
+from app.services.procurement import review as review_service
 from app.services.procurement.review import ProcurementReviewService
 
 
@@ -37,6 +38,9 @@ def test_start_clears_error_and_stage_progress_keeps_run_id(tmp_path, monkeypatc
         "engine_run_id": "existing-run",
         "error": "old error",
         "progress": 35,
+        "progress_step": "build_logical_units",
+        "batch_completed": 2,
+        "batch_total": 10,
         "created_at": "now",
         "updated_at": "now",
         "version": 1,
@@ -45,19 +49,15 @@ def test_start_clears_error_and_stage_progress_keeps_run_id(tmp_path, monkeypatc
 
     captured = {}
 
-    class Thread:
-        def __init__(self, target, args, daemon):
-            captured["args"] = args
-
-        def start(self):
-            pass
-
-    monkeypatch.setattr("app.services.procurement.review.threading.Thread", Thread)
+    monkeypatch.setattr(review_service, "enqueue_review", lambda *args: captured.setdefault("args", args))
     service.start("project-1", "task-1", {"id": 1, "role_codes": ["operator"], "department": "business"}, None)
     started = service.repository.load()["tasks"][0]
     assert "error" not in started
-    assert captured["args"][-2] == "existing-run"
-    assert captured["args"][-1]["project"]["project_code"] == "P-1"
+    assert "progress_step" not in started
+    assert "batch_completed" not in started
+    assert "batch_total" not in started
+    assert captured["args"][:2] == ("project-1", "task-1")
+    assert captured["args"][2].startswith("run_")
 
     service._update_review_progress("project-1", "task-1", "existing-run", "parse_documents", 1, 13)
     service._fail_review_task("project-1", "task-1", "later error")
@@ -70,7 +70,6 @@ def test_start_clears_error_and_stage_progress_keeps_run_id(tmp_path, monkeypatc
     assert state["events"][-1]["actor_id"] == 0
     assert "parse_documents" in state["events"][-1]["reason"]
     get_settings.cache_clear()
-
 
 def test_batch_progress_advances_inside_extract_stage(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DATA_DIR", str(tmp_path))

@@ -146,6 +146,40 @@ def merge_candidate_items(model_items: Any, hard_facts: list[dict[str, Any]]) ->
     ]
 
 
+MISSING_ELEMENT_TERMS = {
+    "budget": ("预算", "最高限价", "采购限价", "响应限价", "控制价"),
+    "consortium": ("联合体", "联合投标", "联合体协议"),
+    "scoring": ("评分", "评审标准", "评分标准", "评分表", "分值", "评标标准"),
+}
+
+
+def missing_element_is_covered(
+    finding: dict[str, Any], assertions: list[dict[str, Any]]
+) -> bool:
+    """在生成缺项结论前，用全文采购断言做一次确定性反查。"""
+    if finding.get("finding_type") != "missing_element":
+        return False
+    claim = " ".join(str(finding.get(field) or "") for field in ("title", "description", "rationale"))
+    claim_terms = [term for terms in MISSING_ELEMENT_TERMS.values() for term in terms if term in claim]
+    if not claim_terms:
+        return False
+    corpus = "\n".join(
+        json_text
+        for assertion in assertions
+        for json_text in (
+            " ".join(str(assertion.get(field) or "") for field in (
+                "statement", "original_subject", "canonical_subject", "action", "object",
+                "condition", "source_value", "requirement_type",
+            )),
+            str(assertion.get("attributes") or ""),
+        )
+    )
+    return any(
+        any(term in claim for term in terms) and any(term in corpus for term in terms)
+        for terms in MISSING_ELEMENT_TERMS.values()
+    )
+
+
 def deterministic_hard_facts(role: str, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """提取少量绝不应依赖模型召回能力的准确项目事实。"""
     if role != "procurement":

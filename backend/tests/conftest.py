@@ -21,7 +21,7 @@ from app.repositories.postgres.db import transaction
 ALL_TABLES = (
     "projects, project_archive_items, tasks, documents, task_members, findings, "
     "comments, events, audit, idempotency, rules, rule_versions, rule_audit, "
-    "user_roles, users, roles"
+    "user_roles, users, roles, legal_units, legal_document_versions, legal_documents"
 )
 
 

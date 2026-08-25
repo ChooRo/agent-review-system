@@ -25,6 +25,20 @@ def fake_completed_review(project_id, task_id, _doc_path, store_results, _fail_t
     store_results(project_id, task_id, {"engine_run_id": "run-test", "quality": {"status": "passed"}, "task_legal_facts": {"project_type": "unknown"}, "legal_applicability": [], "legal_context_freeze": [], "findings": [{"risk_level": "medium", "title": "Test finding", "description": "Review candidate", "recommendation": "Confirm manually", "evidence": []}]})
 
 
+def inline_enqueue_review(project_id: str, task_id: str, run_id: str) -> None:
+    service = review_service.ProcurementReviewService()
+    task, _ = service._task(project_id, task_id)
+    fake_completed_review(
+        project_id,
+        task_id,
+        task["document"]["path"],
+        service._store_review_results,
+        service._fail_review_task,
+        service._update_review_progress,
+        task.get("engine_run_id") or run_id,
+    )
+
+
 def test_operator_can_create_one_procurement_task_per_project(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DATA_DIR", str(tmp_path)); monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads")); get_settings.cache_clear()
     client = TestClient(app); headers = {"Authorization": f"Bearer {login(client, 'operator')}"}
@@ -38,7 +52,7 @@ def test_operator_can_create_one_procurement_task_per_project(tmp_path, monkeypa
 
 def test_start_persists_review_findings_and_events(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DATA_DIR", str(tmp_path)); monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads")); get_settings.cache_clear()
-    monkeypatch.setattr(review_service, "run_review_workflow", fake_completed_review)
+    monkeypatch.setattr(review_service, "enqueue_review", inline_enqueue_review)
     client = TestClient(app); headers = {"Authorization": f"Bearer {login(client, 'operator')}"}
     project = client.post("/api/v1/projects", headers=headers, json={"name": "start", "project_code": "PO-START", "handling_department": "procurement", "project_owner": "operator"}).json()
     task = client.post(f"/api/v1/projects/{project['id']}/procurement-review-tasks", headers=headers, json={"title": "review"}).json()
@@ -59,7 +73,7 @@ def test_start_persists_review_findings_and_events(tmp_path, monkeypatch) -> Non
 
 def test_procurement_review_end_to_end_recheck_flow(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DATA_DIR", str(tmp_path)); monkeypatch.setenv("UPLOADS_DIR", str(tmp_path / "uploads")); get_settings.cache_clear()
-    monkeypatch.setattr(review_service, "run_review_workflow", fake_completed_review)
+    monkeypatch.setattr(review_service, "enqueue_review", inline_enqueue_review)
     client = TestClient(app)
     operator = {"Authorization": f"Bearer {login(client, 'operator')}"}
     primary = {"Authorization": f"Bearer {login(client, 'supervisor')}"}

@@ -16,6 +16,7 @@ def get_current_user(
     store: AuthData,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
 ) -> dict:
+    """验证 Bearer Token，并返回当前有效用户。"""
     unauthorized = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="登录已失效，请重新登录",
